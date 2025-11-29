@@ -738,6 +738,23 @@ async function startMining(key, mask) {
                 // 実際のAnswerのランダム部分を生成
                 const actualRandomSuffix = fillRandomBase62(actualStateRand, 14);
                 console.log('Actual random suffix:', actualRandomSuffix);
+
+                // シェーダー内のランダム部分生成を再現（JavaScript側で）
+                // これは、シェーダー内の実装と同じロジックを使用
+                const RAND_MULT = 6364136223846793005n;
+                const RAND_INC = 1n;
+                let shaderStateRand = actualStateRand;
+                let shaderRandomSuffix = '';
+                const BASE62_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+                for (let i = 0; i < 14; i++) {
+                    shaderStateRand = (shaderStateRand * RAND_MULT + RAND_INC) & 0xffffffffffffffffn;
+                    const idx = Number((shaderStateRand >> 32n) % 62n);
+                    shaderRandomSuffix += BASE62_ALPHABET[idx];
+                }
+                console.log('Shader random suffix (simulated):', shaderRandomSuffix);
+                console.log('Actual random suffix:', actualRandomSuffix);
+                console.log('Random suffix match:', shaderRandomSuffix === actualRandomSuffix);
+
                 const actualAnswer = key + actualRandomSuffix;
                 console.log('Actual Answer:', actualAnswer);
                 console.log('Debug Message as string:', String.fromCharCode(...messageBytes.slice(0, debugUint32[24])));
