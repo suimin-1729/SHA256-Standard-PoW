@@ -249,16 +249,17 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
     
     // 長さを追加（ビット長、ビッグエンディアン、最後の8バイト）
-    // bitLen = msgLen * 8 (最大16*8=128ビット、u32で十分)
+    // bitLen = msgLen * 8 (最大16*8=128ビット、SHA-256では64ビットの長さフィールドを使用)
     let bitLen = msgLen * 8u;
+    // bitLenはu32なので、64ビットの長さフィールドの下位32ビットとして使用
+    // 上位32ビットは0（msgLenは最大16バイトなので、bitLenは最大128ビット）
     if (msgLen < 56u) {
         // 1ブロックで処理可能
         // 長さを最後の8バイト（インデックス56-63）に配置
-        messageBytes[14] = (bitLen << 8u); // ビット長の上位24ビットを0、下位8ビットを配置
-        messageBytes[15] = bitLen; // 下位32ビット
-        // 実際には、bitLenは最大128ビットなので、u32に収まる
-        messageBytes[14] = 0u;
-        messageBytes[15] = bitLen;
+        // messageBytes[14] = バイト56-59, messageBytes[15] = バイト60-63
+        // ビッグエンディアンで配置: バイト56-59は0、バイト60-63にbitLen
+        messageBytes[14] = 0u; // バイト56-59は0（上位32ビット）
+        messageBytes[15] = bitLen; // バイト60-63にbitLen（下位32ビット、ビッグエンディアン）
         
         sha256_transform(&state, &messageBytes);
     } else {
@@ -269,8 +270,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         for (var i = 0u; i < 14u; i++) {
             messageBytes[i] = 0u;
         }
-        messageBytes[14] = 0u;
-        messageBytes[15] = bitLen;
+        // 長さを最後の8バイトに配置
+        messageBytes[14] = 0u; // バイト56-59は0
+        messageBytes[15] = bitLen; // バイト60-63にbitLen
         
         sha256_transform(&state, &messageBytes);
     }
