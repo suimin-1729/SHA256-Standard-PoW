@@ -207,9 +207,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         let byteIdx = i % 4u;
         if (wordIdx < keyWords) {
             let word = keyBuffer[wordIdx];
-            // ビッグエンディアンでバイトを抽出
-            let byteVal = (word >> ((3u - byteIdx) * 8u)) & 0xffu;
-            // メッセージにビッグエンディアンで配置
+            // リトルエンディアンでバイトを抽出（JavaScriptのUint32Arrayはリトルエンディアン）
+            let byteVal = (word >> (byteIdx * 8u)) & 0xffu;
+            // メッセージにビッグエンディアンで配置（SHA-256の要求）
             let msgWordIdx = i / 4u;
             let msgByteIdx = i % 4u;
             messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (byteVal << ((3u - msgByteIdx) * 8u));
@@ -289,10 +289,10 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             let stateWord = state[wordIdx];
             let hashByte = (stateWord >> ((3u - byteIdx) * 8u)) & 0xffu;
             
-            // マスクからバイトを抽出
+            // マスクからバイトを抽出（リトルエンディアン、JavaScriptから）
             if (wordIdx < maskWords) {
                 let maskWord = maskBuffer[wordIdx];
-                let maskByte = (maskWord >> ((3u - byteIdx) * 8u)) & 0xffu;
+                let maskByte = (maskWord >> (byteIdx * 8u)) & 0xffu; // リトルエンディアンで抽出
                 if (hashByte != maskByte) {
                     matches = false;
                     break;
@@ -317,6 +317,8 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             if (wordIdx < 8u) {
                 let stateWord = state[wordIdx];
                 let upperNibble = (stateWord >> ((3u - byteIdx) * 8u + 4u)) & 0x0fu;
+                // マスクのニブルもリトルエンディアンで抽出する必要があるが、
+                // ニブルの場合はマスクバッファから直接取得する方が簡単
                 if (upperNibble != maskNibble) {
                     matches = false;
                 }
@@ -479,8 +481,10 @@ async function startMining(key, mask) {
         const maskUint32 = new Uint32Array(maskBufferPadded.buffer);
         
         // キーバッファ（u32配列に変換）
+        // リトルエンディアンでu32配列に変換する必要がある
         const keyBufferPadded = new Uint8Array(Math.ceil(keyBytes.length / 4) * 4);
         keyBufferPadded.set(keyBytes);
+        // リトルエンディアンでu32配列に変換
         const keyUint32 = new Uint32Array(keyBufferPadded.buffer);
         
         // バッファの作成
