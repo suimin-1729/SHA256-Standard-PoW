@@ -732,24 +732,19 @@ async function startMining(key, mask) {
                 console.log('Actual Answer:', actualAnswer);
                 console.log('Debug Message as string:', String.fromCharCode(...messageBytes.slice(0, debugUint32[24])));
 
-                // 実際のAnswerをSHA-256で計算
+                // 実際のAnswerのバイト配列
                 const actualAnswerBytes = stringToBytes(actualAnswer);
                 console.log('Actual Answer bytes:', Array.from(actualAnswerBytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
-                // 実際のAnswerのSHA-256ハッシュを計算（簡易版、正確にはWeb Crypto APIを使用）
+                // 実際のAnswerをSHA-256で計算（簡易版、正確にはWeb Crypto APIを使用）
                 // ただし、ここでは確認のため、実際のAnswerが正しいか確認する
                 console.log('Actual Answer length:', actualAnswer.length);
                 console.log('Expected Answer length:', key.length + 14);
 
-                // hashArrayを先に定義する
-                const hashArray = new Uint8Array(32);
-                for (let i = 0; i < 8; i++) {
-                    const word = hashUint32[i];
-                    hashArray[i * 4] = (word >> 24) & 0xff;
-                    hashArray[i * 4 + 1] = (word >> 16) & 0xff;
-                    hashArray[i * 4 + 2] = (word >> 8) & 0xff;
-                    hashArray[i * 4 + 3] = word & 0xff;
-                }
+                // 実際のAnswerのSHA-256ハッシュを計算（Web Crypto APIを使用）
+                const actualAnswerHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(actualAnswer));
+                const actualAnswerHashArray = new Uint8Array(actualAnswerHash);
+                console.log('Actual Answer SHA-256:', Array.from(actualAnswerHashArray).map(b => b.toString(16).padStart(2, '0')).join(''));
 
                 // 期待されるハッシュ値（メッセージ "aaWLKWqa7otcE1FE" をSHA-256で計算した結果）
                 console.log('Expected hash (from SHA-256 Online): 31594de75d7e181767a9723ee634392609dbd5f375e0367cede6e260f6f465f0');
