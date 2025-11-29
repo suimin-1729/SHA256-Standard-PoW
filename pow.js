@@ -196,7 +196,10 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     
     // メッセージを準備（64バイト = 16 u32のブロック）
     // バイト単位で構築するため、一時的なバイト配列として扱う
-    var messageBytes: array<u32, 16> = array<u32, 16>(0u);
+    var messageBytes: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        messageBytes[i] = 0u;
+    }
     
     // キーをコピー（u32からバイトを抽出してメッセージに配置）
     let keyWords = (keyLen + 3u) / 4u;
