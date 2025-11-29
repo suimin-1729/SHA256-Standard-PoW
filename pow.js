@@ -689,6 +689,8 @@ async function startMining(key, mask) {
 
                 // 期待されるハッシュ値（メッセージ "aaWLKWqa7otcE1FE" をSHA-256で計算した結果）
                 // これをSHA-256 Onlineで計算して比較してください
+                console.log('Expected hash (from SHA-256 Online): [SHA-256 Onlineで計算した結果] 31594de75d7e181767a9723ee634392609dbd5f375e0367cede6e260f6f465f0');
+                console.log('Calculated hash:', Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join(''));
 
                 // hashArrayを先に定義する
                 const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
