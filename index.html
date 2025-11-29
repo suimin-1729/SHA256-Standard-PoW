@@ -45,20 +45,27 @@
                     <small>16進数文字列を入力してください（例: 0000, 00ff）</small>
                 </div>
 
-                <button type="submit" id="start-btn" class="btn btn-primary">
-                    計算開始
-                </button>
-                <button type="button" id="stop-btn" class="btn btn-secondary hidden">
-                    停止
-                </button>
+                <div class="button-row">
+                    <button type="submit" id="start-btn" class="btn btn-primary">
+                        <span class="btn-label">計算開始</span>
+                        <span class="spinner hidden" id="start-spinner" aria-hidden="true"></span>
+                    </button>
+                    <button type="button" id="stop-btn" class="btn btn-secondary hidden">
+                        停止
+                    </button>
+                </div>
             </form>
 
-            <div id="progress-section" class="progress-section hidden">
+            <div id="progress-section" class="progress-section">
                 <h2>進捗状況</h2>
                 <div class="progress-info">
                     <div class="info-item">
                         <span class="label">現在のIterations (Nonce):</span>
                         <span id="current-nonce" class="value">0</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">現在のCandidate Answer:</span>
+                        <span id="current-answer" class="value">-</span>
                     </div>
                     <div class="info-item">
                         <span class="label">計算速度:</span>
@@ -71,12 +78,10 @@
                         <span class="unit">秒</span>
                     </div>
                 </div>
-                <div class="progress-bar-container">
-                    <div id="progress-bar" class="progress-bar"></div>
-                </div>
+                
             </div>
 
-            <div id="result-section" class="result-section hidden">
+            <div id="result-section" class="result-section">
                 <h2>結果</h2>
                 <div class="result-info">
                     <div class="result-item">

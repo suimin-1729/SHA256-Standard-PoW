@@ -9,12 +9,16 @@ let isMining = false;
 let stopMining = false;
 let startTime = null;
 let lastNonce = 0;
+let handlingResult = false; // guard to avoid processing multiple GPU results concurrently
+// ログ出力制御: true にすると詳細ログを出す（デフォルトは false）
+const VERBOSE_LOGGING = false;
+function dlog(...args) { if (VERBOSE_LOGGING) console.log(...args); }
+function dwarn(...args) { if (VERBOSE_LOGGING) console.warn(...args); }
 
 // ---------- WGSL シェーダー（簡略版） ----------
 /* eslint-disable */
 const sha256Shader = `
-// SHA-256 PoW Compute Shader (Fixed)
-// GPU側でランダムサフィックスを正確に生成
+// SHA-256 PoW Compute Shader (GPU generates suffix per-thread using LCG)
 
 @group(0) @binding(0) var<storage, read> maskBuffer: array<u32>;
 @group(0) @binding(1) var<storage, read> keyBuffer: array<u32>;
@@ -23,45 +27,10 @@ const sha256Shader = `
 @group(0) @binding(4) var<storage, read_write> hashBuffer: array<u32>;
 @group(0) @binding(5) var<storage, read_write> debugBuffer: array<u32>;
 
-// LCG 定数
-const RAND_MULT_LO: u32 = 0x4c957f2du;  // lower 32 bits of 0x5851f42d4c957f2d
-const RAND_MULT_HI: u32 = 0x5851f42du;  // upper 32 bits
-const RAND_INC: u32 = 1u;
-
-// 64-bit multiplication: (lo, hi) * RAND_MULT_LO -> (result_lo, result_hi)
-fn mul_u64_simplified(a_lo: u32, a_hi: u32) -> vec2<u32> {
-    // (a_lo, a_hi) * (RAND_MULT_LO, RAND_MULT_HI)
-    // Using 16-bit splits to avoid overflow: each u32 = (hi16 << 16) | lo16
-    let a_lo_lo = a_lo & 0xffffu;
-    let a_lo_hi = (a_lo >> 16u) & 0xffffu;
-    let m_lo = RAND_MULT_LO & 0xffffu;
-    let m_hi = (RAND_MULT_LO >> 16u) & 0xffffu;
-    
-    // a_lo_lo * m_lo
-    let p1 = a_lo_lo * m_lo;
-    // a_lo_hi * m_lo
-    let p2 = a_lo_hi * m_lo;
-    // a_lo_lo * m_hi
-    let p3 = a_lo_lo * m_hi;
-    // a_lo_hi * m_hi
-    let p4 = a_lo_hi * m_hi;
-    
-    // Sum: (p4 << 32) + (p3 + p2) << 16 + p1
-    let result_lo = p1 + (p2 << 16u);
-    let result_hi = p4 + (p2 >> 16u) + (p3 >> 16u) + a_lo * RAND_MULT_HI + a_hi * RAND_MULT_LO;
-    
-    return vec2<u32>(result_lo, result_hi);
-}
-
-const BASE62: array<u32, 62> = array<u32, 62>(
-    48u,49u,50u,51u,52u,53u,54u,55u,56u,57u,
-    65u,66u,67u,68u,69u,70u,71u,72u,73u,74u,75u,76u,77u,78u,79u,80u,81u,82u,83u,84u,85u,86u,87u,88u,89u,90u,
-    97u,98u,99u,100u,101u,102u,103u,104u,105u,106u,107u,108u,109u,110u,111u,112u,113u,114u,115u,116u,117u,118u,119u,120u,121u,122u
-);
-
+// SHA-256 constants
 const K: array<u32, 64> = array<u32, 64>(
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
-    0x3956c25bu, 0x59f111f1u, 0x923f82e4u, 0xab1c5ed5u,
+    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
     0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
     0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
     0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
@@ -78,211 +47,193 @@ const K: array<u32, 64> = array<u32, 64>(
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 );
 
-fn rightRotate(value: u32, amount: u32) -> u32 {
-    return (value >> amount) | (value << (32u - amount));
-}
+fn rotr(x: u32, n: u32) -> u32 { return (x >> n) | (x << (32u - n)); }
+fn ch(x: u32, y: u32, z: u32) -> u32 { return (x & y) ^ ((~x) & z); }
+fn maj(x: u32, y: u32, z: u32) -> u32 { return (x & y) ^ (x & z) ^ (y & z); }
+fn sigma0(x: u32) -> u32 { return rotr(x,2u) ^ rotr(x,13u) ^ rotr(x,22u); }
+fn sigma1(x: u32) -> u32 { return rotr(x,6u) ^ rotr(x,11u) ^ rotr(x,25u); }
+fn gamma0(x: u32) -> u32 { return rotr(x,7u) ^ rotr(x,18u) ^ (x >> 3u); }
+fn gamma1(x: u32) -> u32 { return rotr(x,17u) ^ rotr(x,19u) ^ (x >> 10u); }
 
-fn sha256_transform(state: ptr<function, array<u32, 8>>, chunk: ptr<function, array<u32, 16>>) {
-    var w: array<u32, 64>;
-    for (var i = 0u; i < 16u; i++) {
-        w[i] = (*chunk)[i];
-    }
-    for (var i = 16u; i < 64u; i++) {
-        let s0 = rightRotate(w[i - 15u], 7u) ^ rightRotate(w[i - 15u], 18u) ^ (w[i - 15u] >> 3u);
-        let s1 = rightRotate(w[i - 2u], 17u) ^ rightRotate(w[i - 2u], 19u) ^ (w[i - 2u] >> 10u);
-        w[i] = w[i - 16u] + s0 + w[i - 7u] + s1;
-    }
+// LCG constants for suffix generation
+const RAND_MULT: u32 = 0x4c957f2du; // low 32 bits of 0x5851f42d4c957f2d
+const RAND_INC: u32 = 1u;
+const BASE62: array<u32, 62> = array<u32, 62>(
+    0x30u, 0x31u, 0x32u, 0x33u, 0x34u, 0x35u, 0x36u, 0x37u, 0x38u, 0x39u,
+    0x41u, 0x42u, 0x43u, 0x44u, 0x45u, 0x46u, 0x47u, 0x48u, 0x49u, 0x4au, 0x4bu, 0x4cu, 0x4du, 0x4eu, 0x4fu,
+    0x50u, 0x51u, 0x52u, 0x53u, 0x54u, 0x55u, 0x56u, 0x57u, 0x58u, 0x59u, 0x5au,
+    0x61u, 0x62u, 0x63u, 0x64u, 0x65u, 0x66u, 0x67u, 0x68u, 0x69u, 0x6au, 0x6bu, 0x6cu, 0x6du, 0x6eu, 0x6fu,
+    0x70u, 0x71u, 0x72u, 0x73u, 0x74u, 0x75u, 0x76u, 0x77u, 0x78u, 0x79u, 0x7au
+);
 
-    var a = (*state)[0];
-    var b = (*state)[1];
-    var c = (*state)[2];
-    var d = (*state)[3];
-    var e = (*state)[4];
-    var f = (*state)[5];
-    var g = (*state)[6];
-    var h_val = (*state)[7];
-
-    for (var i = 0u; i < 64u; i++) {
-        let S1 = rightRotate(e, 6u) ^ rightRotate(e, 11u) ^ rightRotate(e, 25u);
-        let ch = (e & f) ^ (~e & g);
-        let temp1 = h_val + S1 + ch + K[i] + w[i];
-        let S0 = rightRotate(a, 2u) ^ rightRotate(a, 13u) ^ rightRotate(a, 22u);
-        let maj = (a & b) ^ (a & c) ^ (b & c);
-        let temp2 = S0 + maj;
-
-        h_val = g;
-        g = f;
-        f = e;
-        e = d + temp1;
-        d = c;
-        c = b;
-        b = a;
-        a = temp1 + temp2;
-    }
-
-    (*state)[0] += a;
-    (*state)[1] += b;
-    (*state)[2] += c;
-    (*state)[3] += d;
-    (*state)[4] += e;
-    (*state)[5] += f;
-    (*state)[6] += g;
-    (*state)[7] += h_val;
-}
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
-    let index = globalId.x;
-    let startNonce = nonceBuffer[0];
-    let nonce = startNonce + index;
-    let keySeedLow = nonceBuffer[2];
-    let keySeedHigh = nonceBuffer[3];
-    let keyLen = nonceBuffer[4];
-    let randomLen = nonceBuffer[5];
-    let maskLen = nonceBuffer[6];
-    let hasNibble = nonceBuffer[7];
-    let maskNibble = nonceBuffer[8];
-
-    if (atomicLoad(&resultBuffer[0]) != 0u) {
-        return;
-    }
-
-    var state: array<u32, 8> = array<u32, 8>(
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
-    );
-
-    var messageBytes: array<u32, 16>;
-    for (var i = 0u; i < 16u; i++) { messageBytes[i] = 0u; }
-
-    // Key をコピー
-    for (var i = 0u; i < keyLen && i < 64u; i++) {
-        let word = keyBuffer[i / 4u];
-        let byteVal = (word >> ((3u - (i % 4u)) * 8u)) & 0xffu;
-        let msgWordIdx = i / 4u;
-        let msgByteIdx = i % 4u;
-        messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (byteVal << ((3u - msgByteIdx) * 8u));
-    }
-
-    // ランダムサフィックスを生成して追加
-    // 64-bit LCG を使用してJS側と同じ結果を生成
-    var state_lo = keySeedLow ^ nonce;
-    var state_hi = keySeedHigh;
-    
-    for (var i = 0u; i < randomLen && (keyLen + i) < 64u; i++) {
-        // 64-bit LCG: state = state * RAND_MULT + RAND_INC
-        let mul_result = mul_u64_simplified(state_lo, state_hi);
-        state_lo = mul_result.x + RAND_INC;
-        state_hi = mul_result.y + select(0u, 1u, state_lo < mul_result.x);
-        
-        // JS側と同じく上位32ビットを使用してインデックスを計算
-        let idx = (state_hi % 62u);
-        let charCode = BASE62[idx] & 0xffu;
-        let pos = keyLen + i;
-        let msgWordIdx = pos / 4u;
-        let msgByteIdx = pos % 4u;
-        messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (charCode << ((3u - msgByteIdx) * 8u));
-    }
-
-    let msgLen = keyLen + randomLen;
-
-    // パディング
-    if (msgLen < 64u) {
-        let msgWordIdx = msgLen / 4u;
-        let msgByteIdx = msgLen % 4u;
-        messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (0x80u << ((3u - msgByteIdx) * 8u));
-    }
-
-    let bitLen = msgLen * 8u;
-    if (msgLen < 56u) {
-        messageBytes[14] = 0u;
-        messageBytes[15] = bitLen;
-        sha256_transform(&state, &messageBytes);
-    } else {
-        sha256_transform(&state, &messageBytes);
-        for (var i = 0u; i < 14u; i++) { messageBytes[i] = 0u; }
-        messageBytes[14] = 0u;
-        messageBytes[15] = bitLen;
-        sha256_transform(&state, &messageBytes);
-    }
-
-    // マスク比較
-    var matches = true;
-    for (var i = 0u; i < maskLen && i < 32u; i++) {
-        let wordIdx = i / 4u;
-        let byteIdx = i % 4u;
-        if (wordIdx < 8u) {
-            let stateWord = state[wordIdx];
-            let hashByte = (stateWord >> ((3u - byteIdx) * 8u)) & 0xffu;
-            let maskWord = maskBuffer[wordIdx];
-            let maskByte = (maskWord >> ((3u - byteIdx) * 8u)) & 0xffu;
-            if (hashByte != maskByte) { matches = false; break; }
-        } else { matches = false; break; }
-    }
-
-    if (matches && hasNibble != 0u) {
-        if (maskLen >= 32u) { matches = false; }
-        else {
-            let wordIdx = maskLen / 4u;
-            let byteIdx = maskLen % 4u;
-            if (wordIdx < 8u) {
-                let stateWord = state[wordIdx];
-                let upperNibble = (stateWord >> ((3u - byteIdx) * 8u + 4u)) & 0x0fu;
-                if (upperNibble != maskNibble) { matches = false; }
-            } else { matches = false; }
-        }
-    }
-
-    if (matches) {
-        var expected = 0u;
-        var desired = 1u;
-        var result = atomicCompareExchangeWeak(&resultBuffer[0], expected, desired);
-        if (result.old_value == expected && result.exchanged) {
-            nonceBuffer[1] = nonce;
-            for (var i = 0u; i < 8u; i++) { hashBuffer[i] = state[i]; }
-            for (var i = 0u; i < 16u; i++) { debugBuffer[i] = messageBytes[i]; }
-            for (var i = 0u; i < 8u; i++) { debugBuffer[16 + i] = state[i]; }
-            debugBuffer[24] = msgLen;
-            debugBuffer[25] = bitLen;
-            debugBuffer[26] = nonce;
-            return;
-        }
-    }
-
-    if (index == 0u) {
-        for (var i = 0u; i < 16u; i++) { debugBuffer[i] = messageBytes[i]; }
-        debugBuffer[24] = msgLen;
-        debugBuffer[25] = bitLen;
-        debugBuffer[26] = nonce;
-        for (var i = 0u; i < 8u; i++) { debugBuffer[16 + i] = state[i]; }
-    }
-}
-`;
-/* eslint-enable */
-
-// ---------- JS 側ユーティリティ ----------
-function toBigEndianU32(bytes) {
-    // バイト配列をU32アレイに変換 - 各ワードはビッグエンディアン表現
-    // 例: bytes[0]=0xAB, bytes[1]=0xCD -> word=0xABCD****
-    const padded = new Uint8Array(Math.ceil(bytes.length / 4) * 4);
-    for (let i = 0; i < padded.length; i++) padded[i] = 0;
-    for (let i = 0; i < bytes.length; i++) {
-        padded[i] = bytes[i];
-    }
-    
-    // 各4バイトをビッグエンディアンのワードとして解釈
-    const result = new Uint32Array(padded.length / 4);
-    for (let i = 0; i < result.length; i++) {
-        result[i] = (padded[i*4] << 24) | (padded[i*4+1] << 16) | 
-                   (padded[i*4+2] << 8) | padded[i*4+3];
+fn generate_suffix_bytes(seed: u32, length: u32) -> array<u32,16> {
+    var result: array<u32,16>;
+    for (var i: u32 = 0u; i < 16u; i = i + 1u) { result[i] = 0u; }
+    var state = seed & 0xffffffffu;
+    for (var i: u32 = 0u; i < length; i = i + 1u) {
+        state = (state * RAND_MULT + RAND_INC) & 0xffffffffu;
+        let idx = (state >> 16u) % 62u;
+        let byte_val = BASE62[idx];
+        let word_idx = i / 4u;
+        let byte_in_word = i % 4u;
+        result[word_idx] = result[word_idx] | (byte_val << (24u - byte_in_word * 8u));
     }
     return result;
 }
 
+fn expand_message_schedule(block: array<u32,16>) -> array<u32,64> {
+    var w: array<u32,64>;
+    for (var i: u32 = 0u; i < 16u; i = i + 1u) { w[i] = block[i]; }
+    for (var i: u32 = 16u; i < 64u; i = i + 1u) { w[i] = gamma1(w[i-2u]) + w[i-7u] + gamma0(w[i-15u]) + w[i-16u]; }
+    return w;
+}
+
+fn sha256_block(block: array<u32,16>) -> array<u32,8> {
+    var h: array<u32,8> = array<u32,8>(0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u);
+    var w = expand_message_schedule(block);
+    var a: u32 = h[0]; var b: u32 = h[1]; var c: u32 = h[2]; var d: u32 = h[3];
+    var e: u32 = h[4]; var f: u32 = h[5]; var g: u32 = h[6]; var hh: u32 = h[7];
+    for (var i: u32 = 0u; i < 64u; i = i + 1u) {
+        let T1 = hh + sigma1(e) + ch(e,f,g) + K[i] + w[i];
+        let T2 = sigma0(a) + maj(a,b,c);
+        hh = g; g = f; f = e; e = d + T1; d = c; c = b; b = a; a = T1 + T2;
+    }
+    h[0] = a + h[0]; h[1] = b + h[1]; h[2] = c + h[2]; h[3] = d + h[3]; h[4] = e + h[4]; h[5] = f + h[5]; h[6] = g + h[6]; h[7] = hh + h[7];
+    return h;
+}
+
+fn create_padded_message(key: array<u32,16>, key_len: u32, suffix: array<u32,16>, suffix_len: u32) -> array<u32,16> {
+    var msg_words: array<u32,16>;
+    // zero
+    for (var i: u32 = 0u; i < 16u; i = i + 1u) { msg_words[i] = 0u; }
+    var byte_idx: u32 = 0u;
+    // copy key bytes
+    for (var i: u32 = 0u; i < key_len; i = i + 1u) {
+        let wi = i / 4u; let bo = i % 4u;
+        let b = (key[wi] >> (24u - bo * 8u)) & 0xffu;
+        let tw = byte_idx / 4u; let tbo = byte_idx % 4u;
+        msg_words[tw] = msg_words[tw] | (b << (24u - tbo * 8u));
+        byte_idx = byte_idx + 1u;
+    }
+    // copy suffix bytes
+    for (var i: u32 = 0u; i < suffix_len; i = i + 1u) {
+        let wi = i / 4u; let bo = i % 4u;
+        let b = (suffix[wi] >> (24u - bo * 8u)) & 0xffu;
+        let tw = byte_idx / 4u; let tbo = byte_idx % 4u;
+        msg_words[tw] = msg_words[tw] | (b << (24u - tbo * 8u));
+        byte_idx = byte_idx + 1u;
+    }
+    // padding: append 0x80
+    let pw = byte_idx / 4u; let pbo = byte_idx % 4u;
+    msg_words[pw] = msg_words[pw] | (0x80u << (24u - pbo * 8u));
+    // bit length (high 32 bits zero since message <= 64 bytes)
+    let bit_len: u32 = (key_len + suffix_len) * 8u;
+    msg_words[14u] = 0u;
+    msg_words[15u] = bit_len;
+    return msg_words;
+}
+
+fn check_mask(hash: array<u32,8>, mask_len: u32, has_nibble: u32, mask_nibble: u32) -> bool {
+    // mask_len is number of hex nibbles (hex characters)
+    if (mask_len == 0u) { return true; }
+    let full_bytes: u32 = mask_len / 2u; // number of whole bytes to compare
+    for (var i: u32 = 0u; i < full_bytes; i = i + 1u) {
+        let hw = i / 4u; let hb = i % 4u;
+        let hash_byte = (hash[hw] >> (24u - hb * 8u)) & 0xffu;
+        let mw = i / 4u; let mb = i % 4u;
+        let mask_word = maskBuffer[mw];
+        let mask_byte = (mask_word >> (24u - mb * 8u)) & 0xffu;
+        if (hash_byte != mask_byte) { return false; }
+    }
+    // if odd nibble count, check the high nibble of the next hash byte
+    if ((mask_len & 1u) == 1u) {
+        let i = full_bytes; // index of byte containing the remaining nibble
+        let hw = i / 4u; let hb = i % 4u;
+        let hash_byte = (hash[hw] >> (24u - hb * 8u)) & 0xffu;
+        let hn = (hash_byte >> 4u) & 0xfu;
+        if (hn != mask_nibble) { return false; }
+    }
+    return true;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
+    let idx = globalId.x;
+    let start = nonceBuffer[0];
+    let nonce = start + idx;
+    let key_len = nonceBuffer[4];
+    let suffix_len = nonceBuffer[5];
+    let mask_len = nonceBuffer[6];
+    let has_nibble = nonceBuffer[7];
+    let mask_nibble = nonceBuffer[8];
+    let batch_size = nonceBuffer[9];
+
+    // bounds check: avoid reading suffixBuffer out-of-range
+    if (idx >= batch_size) { return; }
+
+    if (atomicLoad(&resultBuffer[0]) != 0u) { return; }
+
+    // copy key
+    var key: array<u32,16>;
+    for (var i: u32 = 0u; i < 16u; i = i + 1u) { key[i] = keyBuffer[i]; }
+
+    // generate suffix locally using LCG (no buffer transfer)
+    let seed_xor = nonceBuffer[2] ^ nonceBuffer[3] ^ nonce;
+    let suffix = generate_suffix_bytes(seed_xor, suffix_len);
+
+    let padded = create_padded_message(key, key_len, suffix, suffix_len);
+    let hash = sha256_block(padded);
+
+    if (check_mask(hash, mask_len, has_nibble, mask_nibble)) {
+        // attempt to claim the result (only one thread should win and write outputs)
+        let expected: u32 = 0u;
+        let desired: u32 = 1u;
+        let res = atomicCompareExchangeWeak(&resultBuffer[0], expected, desired);
+            if (res.exchanged) {
+                nonceBuffer[1] = nonce;
+                for (var i: u32 = 0u; i < 8u; i = i + 1u) { hashBuffer[i] = hash[i]; }
+                // write debug info
+                // compute message schedule locally here (claiming thread only) and store w[0..7]
+                let wlocal = expand_message_schedule(padded);
+                for (var j: u32 = 0u; j < 8u; j = j + 1u) { debugBuffer[32u + j] = wlocal[j]; }
+                for (var i: u32 = 0u; i < 16u; i = i + 1u) { debugBuffer[i] = padded[i]; }
+                for (var i: u32 = 0u; i < 8u; i = i + 1u) { debugBuffer[16u + i] = hash[i]; }
+                debugBuffer[24u] = key_len + suffix_len;
+                debugBuffer[25u] = (key_len + suffix_len) * 8u;
+                debugBuffer[26u] = nonce;
+                return;
+            }
+    }
+    // if thread 0, write some debug for monitoring — but only if result not claimed
+    if (idx == 0u) {
+        if (atomicLoad(&resultBuffer[0]) == 0u) {
+            for (var i: u32 = 0u; i < 16u; i = i + 1u) { debugBuffer[i] = padded[i]; }
+            debugBuffer[24u] = key_len + suffix_len;
+            debugBuffer[25u] = (key_len + suffix_len) * 8u;
+            debugBuffer[26u] = nonce;
+        }
+    }
+}
+`;
+/* eslint-enable */
 function stringToBytes(str) {
     const bytes = new Uint8Array(str.length);
     for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i);
     return bytes;
+}
+
+function toBigEndianU32(byteArray) {
+    const paddedLen = Math.ceil(byteArray.length / 4) * 4;
+    const u32len = Math.ceil(paddedLen / 4);
+    const out = new Uint32Array(u32len);
+    for (let i = 0; i < u32len; i++) {
+        const b0 = byteArray[i*4]   || 0;
+        const b1 = byteArray[i*4+1] || 0;
+        const b2 = byteArray[i*4+2] || 0;
+        const b3 = byteArray[i*4+3] || 0;
+        out[i] = (((b0 << 24) >>> 0) | ((b1 << 16) >>> 0) | ((b2 << 8) >>> 0) | (b3 >>> 0)) >>> 0;
+    }
+    return out;
 }
 
 function fnv1a64(data) {
@@ -303,7 +254,7 @@ async function verifySHA256(messageBytes) {
         const hashBuffer = await crypto.subtle.digest('SHA-256', messageBytes);
         const hashArray = new Uint8Array(hashBuffer);
         const hashHex = Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join('');
-        console.log('Verified SHA-256 (JS crypto):', hashHex);
+        dlog('Verified SHA-256 (JS crypto):', hashHex);
         return hashHex;
     } catch (e) {
         console.error('SHA-256 verification error:', e);
@@ -348,6 +299,32 @@ async function startMining(key, mask) {
     if (!device) { alert('GPU 未初期化'); return; }
     isMining = true; stopMining = false; startTime = Date.now(); lastNonce = 0;
 
+    // 一時的に冗長ログをフィルタリングする（最終結果とエラーのみ表示）
+    const _origConsoleLog = console.log;
+    const _origConsoleWarn = console.warn;
+    let _consoleOverridden = false;
+    if (!VERBOSE_LOGGING) {
+        _consoleOverridden = true;
+        console.log = (...args) => {
+            try {
+                const s = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+                // 最終結果や明示的なエラーのみを表示
+                if (s.includes('=== FINAL RESULT ===') || s.includes('Answer:') || s.includes('エラー') || s.includes('Error')) {
+                    _origConsoleLog(...args);
+                }
+            } catch (e) { /* ignore */ }
+        };
+        console.warn = (...args) => {
+            try {
+                const s = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+                // 重要そうな警告だけ表示（必要なら条件を追加）
+                if (s.includes('エラー') || s.includes('Error')) {
+                    _origConsoleWarn(...args);
+                }
+            } catch (e) { /* ignore */ }
+        };
+    }
+
     const RANDOM_SUFFIX_LEN = 14;
     const { bytes: maskBytes, maskNibble } = parseMask(mask);
     const keyBytes = stringToBytes(key);
@@ -361,22 +338,37 @@ async function startMining(key, mask) {
     }
 
     // Big-Endian に揃えて GPU に渡す
-    const maskUint32 = toBigEndianU32(new Uint8Array(maskBytes));
-    const keyUint32 = toBigEndianU32(new Uint8Array(keyBytes));
+    const maskUint32_raw = toBigEndianU32(new Uint8Array(maskBytes));
+    const keyUint32_raw = toBigEndianU32(new Uint8Array(keyBytes));
+    // Ensure buffers are 16 u32 (64 bytes) so WGSL can read fixed 16-word arrays safely
+    const maskUint32 = new Uint32Array(16);
+    maskUint32.set(maskUint32_raw.slice(0, 16));
+    const keyUint32 = new Uint32Array(16);
+    keyUint32.set(keyUint32_raw.slice(0, 16));
+
+    // バッチサイズ（ワークアイテム数）
+    
 
     // GPU バッファ作成
     const maskGpuBuffer = device.createBuffer({ size: maskUint32.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const keyGpuBuffer  = device.createBuffer({ size: keyUint32.byteLength,  usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const resultBuffer  = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    const nonceBuffer   = device.createBuffer({ size: 9 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const nonceBuffer   = device.createBuffer({ size: 10 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const hashBuffer    = device.createBuffer({ size: 8 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+
+    // 初期バッチサイズ（ワークアイテム数） — Rust gpu.rs に合わせて設定
+    // Rust: 初期値 10,000,000、段階的に増加、最大 50,000,000
+    // WebGPU: 初期値を控えめにして、性能に応じて増加
+    let currentBatchSize = 1000000; // 初期値: 1M (WebGPU メモリ制限を考慮)
+    const maxBatchSize = 10000000;  // 最大値: 10M
+    const previewInterval = 8;      // ライブプレビュー読み取り間隔（バッチ単位）
 
     device.queue.writeBuffer(maskGpuBuffer, 0, maskUint32);
     device.queue.writeBuffer(keyGpuBuffer,  0, keyUint32);
 
     // デバッグバッファ
-    const debugBuffer = device.createBuffer({ size: 27 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const debugReadBuffer = device.createBuffer({ size: 27 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const debugBuffer = device.createBuffer({ size: 40 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const debugReadBuffer = device.createBuffer({ size: 40 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
 
     // パイプライン
     const shaderModule = device.createShaderModule({ code: sha256Shader });
@@ -410,50 +402,82 @@ async function startMining(key, mask) {
         keySeedHigh,
         keyBytes.length,
         RANDOM_SUFFIX_LEN,
-        maskBytes.length,
+        mask.length, // mask length in nibbles (hex chars)
         maskNibble !== null ? 1 : 0,
         maskNibble !== null ? maskNibble : 0
+    ,
+        currentBatchSize
     ]);
     device.queue.writeBuffer(nonceBuffer, 0, nonceData);
 
-    const batchSize = 256 * 256; // workitems
-
     try {
+        // mark UI as running
+        setRunning(true);
+        let batchCounter = 0;
+        let successCount = 0; // 段階的増加用: 連続成功回数
         while (isMining && !stopMining) {
             // reset result
             device.queue.writeBuffer(resultBuffer, 0, new Uint32Array([0]));
-            // update start nonce
+            
+            // update nonce (GPU will generate suffixes locally)
             nonceData[0] = currentNonce;
             device.queue.writeBuffer(nonceBuffer, 0, nonceData);
-
+            
+            // Live preview: show first candidate answer (JS-side LCG computation)
+            const previewSuffix = fillRandomBase62(BigInt(keySeed) ^ BigInt(currentNonce), RANDOM_SUFFIX_LEN);
+            updateLiveCandidate(key + previewSuffix, '-', currentNonce);
+            
             const commandEncoder = device.createCommandEncoder();
+
             const passEncoder = commandEncoder.beginComputePass();
             passEncoder.setPipeline(computePipeline);
             passEncoder.setBindGroup(0, bindGroup);
-            passEncoder.dispatchWorkgroups(Math.ceil(batchSize / 256));
+            passEncoder.dispatchWorkgroups(Math.ceil(currentBatchSize / 256));
             passEncoder.end();
 
             // copy results out
             commandEncoder.copyBufferToBuffer(resultBuffer, 0, resultReadBuffer, 0, 4);
             commandEncoder.copyBufferToBuffer(nonceBuffer, 0, nonceReadBuffer, 0, 9 * 4);
             commandEncoder.copyBufferToBuffer(hashBuffer, 0, hashReadBuffer, 0, 8 * 4);
-            commandEncoder.copyBufferToBuffer(debugBuffer, 0, debugReadBuffer, 0, 27 * 4);
+            commandEncoder.copyBufferToBuffer(debugBuffer, 0, debugReadBuffer, 0, 40 * 4);
 
             const commandBuffer = commandEncoder.finish();
             device.queue.submit([commandBuffer]);
 
-            await resultReadBuffer.mapAsync(GPUMapMode.READ);
-            await nonceReadBuffer.mapAsync(GPUMapMode.READ);
+                await resultReadBuffer.mapAsync(GPUMapMode.READ);
+                await nonceReadBuffer.mapAsync(GPUMapMode.READ);
 
             const resultArray = new Uint32Array(resultReadBuffer.getMappedRange().slice(0));
             const nonceArray  = new Uint32Array(nonceReadBuffer.getMappedRange().slice(0));
 
-            currentNonce += batchSize;
+            currentNonce += currentBatchSize;
             lastNonce = currentNonce;
             updateProgress(currentNonce);
+            
+            // バッチサイズを段階的に増加（見つからなかった場合）
+            if (resultArray[0] === 0) {
+                successCount++;
+                if (successCount >= 2 && currentBatchSize < maxBatchSize) {
+                    const newSize = Math.min(currentBatchSize * 2, maxBatchSize);
+                    if (newSize > currentBatchSize) {
+                        currentBatchSize = newSize;
+                        successCount = 0; // リセット
+                        dlog(`Batch size increased to ${currentBatchSize}`);
+                    }
+                }
+            } else {
+                successCount = 0; // 見つかった場合はリセット
+            }
 
             if (resultArray[0] !== 0) {
                 // found
+                if (handlingResult) {
+                    // 既に別のスレッドで処理中 → スキップして次バッチへ
+                    resultReadBuffer.unmap(); nonceReadBuffer.unmap();
+                    continue;
+                }
+                handlingResult = true;
+                
                 await hashReadBuffer.mapAsync(GPUMapMode.READ);
                 await debugReadBuffer.mapAsync(GPUMapMode.READ);
 
@@ -488,32 +512,29 @@ async function startMining(key, mask) {
                     hashArray[i * 4 + 3] = w & 0xff;
                 }
 
-                // 再現: 実際のランダムサフィックスを JS 側で生成して表示
+                // 再現: GPU の debugBuffer から取り出したメッセージを優先して表示
                 const foundNonce = nonceArray[1];
-                const actualStateRand = BigInt(keySeed) ^ BigInt(foundNonce);
-                const randomSuffix = fillRandomBase62(actualStateRand, RANDOM_SUFFIX_LEN);
-                const answer = key + randomSuffix;
-
                 // メッセージの実際の長さを取得
                 const msgLen = debugUint32[24];
                 const actualMessage = String.fromCharCode(...messageBytes.slice(0, msgLen));
+                const answer = actualMessage; // GPU が出力したメッセージをそのまま表示（確実な一致）
 
-                console.log('--- Found ---');
-                console.log('Nonce:', foundNonce);
-                console.log('Actual Answer (from LCG):', answer);
-                console.log('Message in GPU:', actualMessage);
-                console.log('Message Length:', msgLen);
-                console.log('Message (hex):', Array.from(messageBytes.slice(0, msgLen)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                dlog('--- Found ---');
+                dlog('Nonce:', foundNonce);
+                dlog('Actual Answer (from LCG):', answer);
+                dlog('Message in GPU:', actualMessage);
+                dlog('Message Length:', msgLen);
+                dlog('Message (hex):', Array.from(messageBytes.slice(0, msgLen)).map(b => b.toString(16).padStart(2, '0')).join(' '));
                 
                 // Hash をバイト配列として取得
                 const hashFromShader = Array.from(stateHashArray).map(b => b.toString(16).padStart(2,'0')).join('');
-                console.log('Hash from shader:', hashFromShader);
+                dlog('Hash from shader:', hashFromShader);
                 
                 // メッセージが一致しているか確認
-                if (actualMessage !== answer) {
-                    console.warn('WARNING: Generated message does not match expected answer!');
-                    console.warn('Expected:', answer);
-                    console.warn('Got:', actualMessage);
+                if (actualMessage !== (key + fillRandomBase62(BigInt(keySeed) ^ BigInt(foundNonce), RANDOM_SUFFIX_LEN))) {
+                    dwarn('WARNING: JS LCG result differs from GPU output. Using GPU output as authoritative for display.');
+                    dwarn('JS LCG:', key + fillRandomBase62(BigInt(keySeed) ^ BigInt(foundNonce), RANDOM_SUFFIX_LEN));
+                    dwarn('GPU message:', actualMessage);
                 }
 
                 // JS 側で再計算して検証
@@ -521,25 +542,114 @@ async function startMining(key, mask) {
                 for (let i = 0; i < msgLen; i++) {
                     messageBytesForVerify[i] = actualMessage.charCodeAt(i);
                 }
-                console.log('Verifying SHA-256...');
-                verifySHA256(messageBytesForVerify);
+                dlog('Verifying SHA-256...');
+                const verifiedHex = await verifySHA256(messageBytesForVerify);
 
-                // show result
+                // Compare shader hash vs JS-verified hash
+                const shaderHex = hashFromShader.toLowerCase();
+                const verifiedHexNorm = (verifiedHex || '').toLowerCase();
+                if (verifiedHexNorm !== shaderHex) {
+                    // Detailed one-shot diagnostic and stop mining to avoid log spam
+                    console.error('GPU/CPU SHA-256 mismatch detected — dumping diagnostic and stopping mining.');
+                    console.error('Nonce:', foundNonce);
+                    console.error('Message (ascii):', actualMessage);
+                    console.error('Message (hex):', Array.from(messageBytes.slice(0, msgLen)).map(b => b.toString(16).padStart(2,'0')).join(' '));
+                    // dump message words as u32 (big-endian interpretation)
+                    const msgWords = [];
+                    for (let i = 0; i < 16; i++) msgWords.push(('0x' + (debugUint32[i] >>> 0).toString(16).padStart(8,'0')));
+                    console.error('Message words (u32 BE):', msgWords.join(' '));
+                    console.error('Shader state words (u32 BE):', Array.from(debugUint32.slice(16,24)).map(v => '0x' + (v >>> 0).toString(16).padStart(8,'0')).join(' '));
+                        console.error('Message schedule w[0..7] (u32 BE):', Array.from(debugUint32.slice(32,40)).map(v => '0x' + (v >>> 0).toString(16).padStart(8,'0')).join(' '));
+                    console.error('Shader hash :', shaderHex.toUpperCase());
+                    console.error('Verified hash:', verifiedHexNorm.toUpperCase());
+                    // reset result flag on GPU for cleanliness
+                    device.queue.writeBuffer(resultBuffer, 0, new Uint32Array([0]));
+                    resultReadBuffer.unmap(); nonceReadBuffer.unmap(); hashReadBuffer.unmap(); debugReadBuffer.unmap();
+                    isMining = false; handlingResult = false;
+                    break;
+                }
+
+                // show result (verified)
                 const elapsed = (Date.now() - startTime) / 1000;
-                showResult(foundNonce, stateHashArray, elapsed, key, keySeed);
+                showResult(foundNonce, stateHashArray, elapsed, key, keySeed, answer);
 
                 resultReadBuffer.unmap(); nonceReadBuffer.unmap(); hashReadBuffer.unmap(); debugReadBuffer.unmap();
-                isMining = false; break;
+                isMining = false; handlingResult = false; break;
             }
 
-            resultReadBuffer.unmap(); nonceReadBuffer.unmap();
+            // live preview: occasionally map debug buffer and compute preview hash
+            if ((batchCounter % previewInterval) === 0) {
+                await debugReadBuffer.mapAsync(GPUMapMode.READ);
+                const debugPreview = new Uint32Array(debugReadBuffer.getMappedRange().slice(0));
+                const previewMsgLen = debugPreview[24] || 0;
+                const previewBytes = new Uint8Array(previewMsgLen);
+                for (let i = 0; i < previewMsgLen; i++) {
+                    const w = debugPreview[Math.floor(i / 4)] >>> 0;
+                    const shift = 24 - (i % 4) * 8;
+                    previewBytes[i] = (w >> shift) & 0xff;
+                }
+                const previewAnswer = previewMsgLen > 0 ? String.fromCharCode(...previewBytes) : '-';
+                // unmap before running CPU-side digest to avoid holding mapped ranges
+                debugReadBuffer.unmap();
+                resultReadBuffer.unmap(); nonceReadBuffer.unmap();
+                // async compute the preview hash and update UI (no await)
+                verifySHA256(previewBytes).then((h) => {
+                    updateLiveCandidate(previewAnswer, h || '-', nonceArray[0]);
+                }).catch(() => { updateLiveCandidate(previewAnswer, '-', nonceArray[0]); });
+            } else {
+                // skip debug read this batch — we already updated candidate from JS-generated suffix
+                resultReadBuffer.unmap(); nonceReadBuffer.unmap();
+            }
+
+            batchCounter = (batchCounter + 1) >>> 0;
             // 次バッチへ
         }
     } catch (e) {
         console.error('Mining error:', e);
         alert('エラー: ' + e.message);
         isMining = false;
+    } finally {
+        // コンソールを元に戻す
+        if (_consoleOverridden) {
+            console.log = _origConsoleLog;
+            console.warn = _origConsoleWarn;
+        }
+        setRunning(false);
     }
+}
+
+// UI helper: enable/disable inputs and show spinner
+function setRunning(running) {
+    const keyInput = document.getElementById('key-input');
+    const maskInput = document.getElementById('mask-input');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const spinner = document.getElementById('start-spinner');
+    const progress = document.getElementById('progress-section');
+    const result = document.getElementById('result-section');
+    if (running) {
+        if (keyInput) keyInput.classList.add('disabled'), keyInput.disabled = true;
+        if (maskInput) maskInput.classList.add('disabled'), maskInput.disabled = true;
+        if (startBtn) startBtn.disabled = true;
+        if (spinner) spinner.classList.remove('hidden');
+        if (stopBtn) stopBtn.classList.remove('hidden');
+        if (progress) progress.classList.remove('hidden');
+        if (result) result.classList.remove('hidden');
+    } else {
+        if (keyInput) keyInput.classList.remove('disabled'), keyInput.disabled = false;
+        if (maskInput) maskInput.classList.remove('disabled'), maskInput.disabled = false;
+        if (startBtn) startBtn.disabled = false;
+        if (spinner) spinner.classList.add('hidden');
+        if (stopBtn) stopBtn.classList.add('hidden');
+    }
+}
+
+// update live candidate display
+function updateLiveCandidate(answer, hashHex, nonce) {
+    const elAns = document.getElementById('current-answer');
+    const elNonce = document.getElementById('current-nonce');
+    if (elAns) elAns.textContent = answer;
+    if (elNonce) elNonce.textContent = Number(nonce).toLocaleString();
 }
 
 function parseMask(maskStr) {
@@ -565,11 +675,12 @@ function updateProgress(nonce) {
     if (elRate) elRate.textContent = hashRate.toLocaleString();
 }
 
-function showResult(nonce, hashArray, elapsed, key, keySeed) {
+function showResult(nonce, hashArray, elapsed, key, keySeed, overrideAnswer) {
     let hashHex = Array.from(hashArray).map(b => b.toString(16).padStart(2,'0')).join('');
     const RANDOM_SUFFIX_LEN = 14;
-    const randomSuffix = fillRandomBase62(BigInt(keySeed) ^ BigInt(nonce), RANDOM_SUFFIX_LEN);
-    const answer = key + randomSuffix;
+    const answer = (typeof overrideAnswer === 'string' && overrideAnswer.length > 0)
+        ? overrideAnswer
+        : key + fillRandomBase62(BigInt(keySeed) ^ BigInt(nonce), RANDOM_SUFFIX_LEN);
     const section = document.getElementById('result-section');
     if (section) {
         document.getElementById('result-nonce').textContent = nonce.toLocaleString();
