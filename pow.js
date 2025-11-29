@@ -675,6 +675,13 @@ async function startMining(key, mask) {
                 console.log('Message as string:', String.fromCharCode(...messageBytes.slice(0, debugUint32[24])));
                 console.log('Message bytes 56-63 (length field):', Array.from(messageBytes.slice(56, 64)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
+                // messageBytesの各u32ワードを表示
+                console.log('Message u32 words:');
+                for (let i = 0; i < 16; i++) {
+                    const word = debugUint32[i];
+                    console.log(`  [${i}]: 0x${word.toString(16).padStart(8, '0')} = ${Array.from(messageBytes.slice(i * 4, i * 4 + 4)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+                }
+
                 // SHA-256状態を表示
                 console.log('SHA-256 State:', Array.from(debugUint32.slice(16, 24)).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
 
