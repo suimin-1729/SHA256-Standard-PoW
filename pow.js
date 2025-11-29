@@ -687,12 +687,7 @@ async function startMining(key, mask) {
                 // SHA-256状態を表示
                 console.log('SHA-256 State:', Array.from(debugUint32.slice(16, 24)).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
 
-                // 期待されるハッシュ値（メッセージ "aaWLKWqa7otcE1FE" をSHA-256で計算した結果）
-                // これをSHA-256 Onlineで計算して比較してください
-                console.log('Expected hash (from SHA-256 Online): [SHA-256 Onlineで計算した結果] 31594de75d7e181767a9723ee634392609dbd5f375e0367cede6e260f6f465f0');
-                console.log('Calculated hash:', Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join(''));
-
-                // hashArrayを先に定義する
+                // hashArrayを先に定義する（693行目の前に移動）
                 const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
                 const hashArray = new Uint8Array(32);
                 for (let i = 0; i < 8; i++) {
@@ -702,6 +697,10 @@ async function startMining(key, mask) {
                     hashArray[i * 4 + 2] = (word >> 8) & 0xff;
                     hashArray[i * 4 + 3] = word & 0xff;
                 }
+
+                // 期待されるハッシュ値（メッセージ "aaWLKWqa7otcE1FE" をSHA-256で計算した結果）
+                console.log('Expected hash (from SHA-256 Online): 31594de75d7e181767a9723ee634392609dbd5f375e0367cede6e260f6f465f0');
+                console.log('Calculated hash:', Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join(''));
 
                 const foundNonce = nonceArray[1];
                 const elapsed = (Date.now() - startTime) / 1000;
