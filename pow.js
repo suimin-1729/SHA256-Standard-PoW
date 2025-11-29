@@ -428,8 +428,8 @@ async function startMining(key, mask) {
         });
         
         // コマンドエンコーダの作成
-        const commandEncoder = device.createCommandEncoder();
-        const passEncoder = commandEncoder.beginComputePass();
+        let commandEncoder = device.createCommandEncoder();
+        let passEncoder = commandEncoder.beginComputePass();
         passEncoder.setPipeline(computePipeline);
         passEncoder.setBindGroup(0, bindGroup);
         
