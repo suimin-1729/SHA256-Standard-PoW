@@ -116,16 +116,13 @@ fn rightRotate(value: u32, amount: u32) -> u32 {
     return (value >> amount) | (value << (32u - amount));
 }
 
-fn sha256_transform(state: ptr<function, array<u32, 8>>, chunk: ptr<function, array<u8, 64>>) {
+fn sha256_transform(state: ptr<function, array<u32, 8>>, chunk: ptr<function, array<u32, 16>>) {
     var w: array<u32, 64>;
     
     // チャンクをu32配列に変換（ビッグエンディアン）
+    // chunkは既にu32配列なので、そのまま使用（ビッグエンディアンとして解釈）
     for (var i = 0u; i < 16u; i++) {
-        let offset = i * 4u;
-        w[i] = (u32((*chunk)[offset]) << 24u) |
-               (u32((*chunk)[offset + 1u]) << 16u) |
-               (u32((*chunk)[offset + 2u]) << 8u) |
-               u32((*chunk)[offset + 3u]);
+        w[i] = (*chunk)[i];
     }
     
     // メッセージスケジュールを拡張
@@ -197,17 +194,22 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
     );
     
-    // メッセージを準備（64バイトのブロック）
-    var message: array<u8, 64> = array<u8, 64>(0u);
+    // メッセージを準備（64バイト = 16 u32のブロック）
+    // バイト単位で構築するため、一時的なバイト配列として扱う
+    var messageBytes: array<u32, 16> = array<u32, 16>(0u);
     
-    // キーをコピー（u32からバイトを抽出）
+    // キーをコピー（u32からバイトを抽出してメッセージに配置）
     let keyWords = (keyLen + 3u) / 4u;
     for (var i = 0u; i < keyLen && i < 64u; i++) {
         let wordIdx = i / 4u;
         let byteIdx = i % 4u;
         if (wordIdx < keyWords) {
             let word = keyBuffer[wordIdx];
-            message[i] = u8((word >> ((3u - byteIdx) * 8u)) & 0xffu);
+            let byteVal = (word >> ((3u - byteIdx) * 8u)) & 0xffu;
+            // バイトをu32配列に配置（ビッグエンディアン）
+            let msgWordIdx = i / 4u;
+            let msgByteIdx = i % 4u;
+            messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (byteVal << ((3u - msgByteIdx) * 8u));
         }
     }
     
@@ -226,14 +228,21 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         
         // idx = (stateRand >> 32) % 62
         let idx = (stateRandHigh % 62u);
-        message[keyLen + i] = u8(BASE62[idx]);
+        let byteVal = BASE62[idx] & 0xffu;
+        // バイトをu32配列に配置（ビッグエンディアン）
+        let pos = keyLen + i;
+        let msgWordIdx = pos / 4u;
+        let msgByteIdx = pos % 4u;
+        messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (byteVal << ((3u - msgByteIdx) * 8u));
     }
     
     let msgLen = keyLen + randomLen;
     
     // パディング: 0x80を追加
     if (msgLen < 64u) {
-        message[msgLen] = 0x80u;
+        let msgWordIdx = msgLen / 4u;
+        let msgByteIdx = msgLen % 4u;
+        messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (0x80u << ((3u - msgByteIdx) * 8u));
     }
     
     // 長さを追加（ビット長、ビッグエンディアン、最後の8バイト）
@@ -241,55 +250,52 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     let bitLen = msgLen * 8u;
     if (msgLen < 56u) {
         // 1ブロックで処理可能
-        message[56] = 0u;
-        message[57] = 0u;
-        message[58] = 0u;
-        message[59] = 0u;
-        message[60] = u8((bitLen >> 24u) & 0xffu);
-        message[61] = u8((bitLen >> 16u) & 0xffu);
-        message[62] = u8((bitLen >> 8u) & 0xffu);
-        message[63] = u8(bitLen & 0xffu);
+        // 長さを最後の8バイト（インデックス56-63）に配置
+        messageBytes[14] = (bitLen << 8u); // ビット長の上位24ビットを0、下位8ビットを配置
+        messageBytes[15] = bitLen; // 下位32ビット
+        // 実際には、bitLenは最大128ビットなので、u32に収まる
+        messageBytes[14] = 0u;
+        messageBytes[15] = bitLen;
         
-        sha256_transform(&state, &message);
+        sha256_transform(&state, &messageBytes);
     } else {
         // 2ブロック必要
-        sha256_transform(&state, &message);
+        sha256_transform(&state, &messageBytes);
         
         // 2ブロック目を準備
-        for (var i = 0u; i < 56u; i++) {
-            message[i] = 0u;
+        for (var i = 0u; i < 14u; i++) {
+            messageBytes[i] = 0u;
         }
-        message[56] = 0u;
-        message[57] = 0u;
-        message[58] = 0u;
-        message[59] = 0u;
-        message[60] = u8((bitLen >> 24u) & 0xffu);
-        message[61] = u8((bitLen >> 16u) & 0xffu);
-        message[62] = u8((bitLen >> 8u) & 0xffu);
-        message[63] = u8(bitLen & 0xffu);
+        messageBytes[14] = 0u;
+        messageBytes[15] = bitLen;
         
-        sha256_transform(&state, &message);
+        sha256_transform(&state, &messageBytes);
     }
     
-    // ハッシュ結果をバイト配列に変換（ビッグエンディアン）
-    var hash: array<u8, 32> = array<u8, 32>(0u);
-    for (var i = 0u; i < 8u; i++) {
-        hash[i * 4u] = u8((state[i] >> 24u) & 0xffu);
-        hash[i * 4u + 1u] = u8((state[i] >> 16u) & 0xffu);
-        hash[i * 4u + 2u] = u8((state[i] >> 8u) & 0xffu);
-        hash[i * 4u + 3u] = u8(state[i] & 0xffu);
-    }
+    // ハッシュ結果をバイト配列として扱う（ビッグエンディアン）
+    // stateは既にu32配列なので、そのまま使用
+    // ハッシュの比較には、state配列から直接バイトを抽出
     
-    // マスクチェック（u32からバイトを抽出して比較）
+    // マスクチェック（state配列からバイトを抽出して比較）
     var matches = true;
     let maskWords = (maskLen + 3u) / 4u;
     for (var i = 0u; i < maskLen && i < 32u; i++) {
         let wordIdx = i / 4u;
         let byteIdx = i % 4u;
-        if (wordIdx < maskWords) {
-            let maskWord = maskBuffer[wordIdx];
-            let maskByte = u8((maskWord >> ((3u - byteIdx) * 8u)) & 0xffu);
-            if (hash[i] != maskByte) {
+        if (wordIdx < 8u) {
+            // state配列からバイトを抽出（ビッグエンディアン）
+            let stateWord = state[wordIdx];
+            let hashByte = (stateWord >> ((3u - byteIdx) * 8u)) & 0xffu;
+            
+            // マスクからバイトを抽出
+            if (wordIdx < maskWords) {
+                let maskWord = maskBuffer[wordIdx];
+                let maskByte = (maskWord >> ((3u - byteIdx) * 8u)) & 0xffu;
+                if (hashByte != maskByte) {
+                    matches = false;
+                    break;
+                }
+            } else {
                 matches = false;
                 break;
             }
@@ -304,8 +310,15 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         if (maskLen >= 32u) {
             matches = false;
         } else {
-            let upperNibble = (hash[maskLen] >> 4u) & 0x0fu;
-            if (upperNibble != maskNibble) {
+            let wordIdx = maskLen / 4u;
+            let byteIdx = maskLen % 4u;
+            if (wordIdx < 8u) {
+                let stateWord = state[wordIdx];
+                let upperNibble = (stateWord >> ((3u - byteIdx) * 8u + 4u)) & 0x0fu;
+                if (upperNibble != maskNibble) {
+                    matches = false;
+                }
+            } else {
                 matches = false;
             }
         }
