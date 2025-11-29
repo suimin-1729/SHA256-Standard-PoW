@@ -514,26 +514,6 @@ async function startMining(key, mask) {
         device.queue.writeBuffer(maskGpuBuffer, 0, maskUint32);
         device.queue.writeBuffer(keyGpuBuffer, 0, keyUint32);
         
-        // バインドグループの作成
-        const bindGroup = device.createBindGroup({
-            layout: device.createBindGroupLayout({
-                entries: [
-                    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-                    { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-                    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
-                ]
-            }),
-            entries: [
-                { binding: 0, resource: { buffer: maskGpuBuffer } },
-                { binding: 1, resource: { buffer: keyGpuBuffer } },
-                { binding: 2, resource: { buffer: resultBuffer } },
-                { binding: 3, resource: { buffer: nonceBuffer } },
-                { binding: 4, resource: { buffer: hashBuffer } }
-            ]
-        });
-        
         // 計算パイプラインの作成
         const computePipeline = device.createComputePipeline({
             layout: 'auto',
@@ -541,6 +521,18 @@ async function startMining(key, mask) {
                 module: shaderModule,
                 entryPoint: 'main'
             }
+        });
+        
+        // パイプラインからレイアウトを取得してバインドグループを作成
+        const bindGroup = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: maskGpuBuffer } },
+                { binding: 1, resource: { buffer: keyGpuBuffer } },
+                { binding: 2, resource: { buffer: resultBuffer } },
+                { binding: 3, resource: { buffer: nonceBuffer } },
+                { binding: 4, resource: { buffer: hashBuffer } }
+            ]
         });
         
         // コマンドエンコーダの作成
