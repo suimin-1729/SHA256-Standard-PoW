@@ -654,7 +654,6 @@ async function startMining(key, mask) {
                 await hashReadBuffer.mapAsync(GPUMapMode.READ);
                 await debugReadBuffer.mapAsync(GPUMapMode.READ);
                 
-                const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
                 const debugUint32 = new Uint32Array(debugReadBuffer.getMappedRange());
                 
                 // デバッグ情報を表示
@@ -662,7 +661,7 @@ async function startMining(key, mask) {
                 console.log('Nonce:', debugUint32[26]);
                 console.log('Message Length:', debugUint32[24]);
                 console.log('Bit Length:', debugUint32[25]);
-                
+
                 // メッセージをバイト配列として表示
                 const messageBytes = new Uint8Array(64);
                 for (let i = 0; i < 16; i++) {
@@ -672,11 +671,23 @@ async function startMining(key, mask) {
                     messageBytes[i * 4 + 2] = (word >> 8) & 0xff;
                     messageBytes[i * 4 + 3] = word & 0xff;
                 }
-                console.log('Message (hex):', Array.from(messageBytes.slice(0, debugUint32[24] + 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-                
+                console.log('Message (hex):', Array.from(messageBytes.slice(0, 64)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                console.log('Message bytes 56-63 (length field):', Array.from(messageBytes.slice(56, 64)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
                 // SHA-256状態を表示
                 console.log('SHA-256 State:', Array.from(debugUint32.slice(16, 24)).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
-                
+
+                // hashArrayを先に定義する
+                const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
+                const hashArray = new Uint8Array(32);
+                for (let i = 0; i < 8; i++) {
+                    const word = hashUint32[i];
+                    hashArray[i * 4] = (word >> 24) & 0xff;
+                    hashArray[i * 4 + 1] = (word >> 16) & 0xff;
+                    hashArray[i * 4 + 2] = (word >> 8) & 0xff;
+                    hashArray[i * 4 + 3] = word & 0xff;
+                }
+
                 const foundNonce = nonceArray[1];
                 const elapsed = (Date.now() - startTime) / 1000;
                 
