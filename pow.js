@@ -120,7 +120,7 @@ fn sha256_transform(state: ptr<function, array<u32, 8>>, chunk: ptr<function, ar
     var w: array<u32, 64>;
     
     // チャンクをu32配列に変換（ビッグエンディアン）
-    // chunkは既にu32配列なので、そのまま使用（ビッグエンディアンとして解釈）
+    // chunkは既にu32配列でビッグエンディアンとして配置されている
     for (var i = 0u; i < 16u; i++) {
         w[i] = (*chunk)[i];
     }
@@ -195,7 +195,6 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     );
     
     // メッセージを準備（64バイト = 16 u32のブロック）
-    // バイト単位で構築するため、一時的なバイト配列として扱う
     var messageBytes: array<u32, 16>;
     for (var i = 0u; i < 16u; i++) {
         messageBytes[i] = 0u;
@@ -208,8 +207,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         let byteIdx = i % 4u;
         if (wordIdx < keyWords) {
             let word = keyBuffer[wordIdx];
+            // ビッグエンディアンでバイトを抽出
             let byteVal = (word >> ((3u - byteIdx) * 8u)) & 0xffu;
-            // バイトをu32配列に配置（ビッグエンディアン）
+            // メッセージにビッグエンディアンで配置
             let msgWordIdx = i / 4u;
             let msgByteIdx = i % 4u;
             messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (byteVal << ((3u - msgByteIdx) * 8u));
@@ -217,8 +217,6 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
     
     // ランダム部分を生成（BASE62）
-    // stateRand = keySeed ^ nonce (64ビット)
-    // nonceはu32なので、keySeedLowとXORするだけ
     var stateRandLow = keySeedLow ^ nonce;
     var stateRandHigh = keySeedHigh;
     
@@ -232,7 +230,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         // idx = (stateRand >> 32) % 62
         let idx = (stateRandHigh % 62u);
         let byteVal = BASE62[idx] & 0xffu;
-        // バイトをu32配列に配置（ビッグエンディアン）
+        // メッセージにビッグエンディアンで配置
         let pos = keyLen + i;
         let msgWordIdx = pos / 4u;
         let msgByteIdx = pos % 4u;
@@ -249,10 +247,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
     
     // 長さを追加（ビット長、ビッグエンディアン、最後の8バイト）
-    // bitLen = msgLen * 8 (最大16*8=128ビット、SHA-256では64ビットの長さフィールドを使用)
+    // bitLen = msgLen * 8 (u32、最大16*8=128ビット)
+    // SHA-256では64ビットの長さフィールドを使用（バイト56-63）
     let bitLen = msgLen * 8u;
-    // bitLenはu32なので、64ビットの長さフィールドの下位32ビットとして使用
-    // 上位32ビットは0（msgLenは最大16バイトなので、bitLenは最大128ビット）
     if (msgLen < 56u) {
         // 1ブロックで処理可能
         // 長さを最後の8バイト（インデックス56-63）に配置
