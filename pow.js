@@ -347,6 +347,20 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             for (var i = 0u; i < 8u; i++) {
                 hashBuffer[i] = state[i];
             }
+            
+            // デバッグ: 実際に結果を見つけたスレッドがデバッグ情報を書き込む
+            // messageBytesをデバッグバッファにコピー
+            for (var i = 0u; i < 16u; i++) {
+                debugBuffer[i] = messageBytes[i];
+            }
+            // SHA-256状態をデバッグバッファにコピー
+            for (var i = 0u; i < 8u; i++) {
+                debugBuffer[16 + i] = state[i];
+            }
+            debugBuffer[24] = msgLen;
+            debugBuffer[25] = bitLen;
+            debugBuffer[26] = nonce;
+            
             return;
         }
     }
