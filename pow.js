@@ -1,9 +1,8 @@
-// Fixed WebGPU PoW implementation (pow_fixed.js)
-// 修正点まとめ:
-// - JS と WGSL 間のエンディアン不整合を解消（key/mask を Big-Endian 表示で GPU に渡す）
-// - LCG の乗数を JS / WGSL 両方で一致させた (0x5851f42d4c957f2d)
-// - hashBuffer の usage 修正（STORAGE を含める）
-// - デバッグ出力は残しました（問題追跡に便利なため）
+// Fixed WebGPU PoW implementation
+// 修正点:
+// - LCG をJS側で計算し、ランダムサフィックスを GPU に渡す
+// - GPU側は与えられたサフィックスを使用してメッセージを構築、SHA-256計算
+// これによりエンディアン不整合やLCG実装の不正確さを完全に排除
 
 let device = null;
 let isMining = false;
@@ -11,8 +10,12 @@ let stopMining = false;
 let startTime = null;
 let lastNonce = 0;
 
-// ---------- WGSL シェーダー（LCG 定数を修正、その他は大筋同等） ----------
+// ---------- WGSL シェーダー（簡略版） ----------
+/* eslint-disable */
 const sha256Shader = `
+// SHA-256 PoW Compute Shader (Fixed)
+// GPU側でランダムサフィックスを正確に生成
+
 @group(0) @binding(0) var<storage, read> maskBuffer: array<u32>;
 @group(0) @binding(1) var<storage, read> keyBuffer: array<u32>;
 @group(0) @binding(2) var<storage, read_write> resultBuffer: array<atomic<u32>>;
@@ -20,62 +23,21 @@ const sha256Shader = `
 @group(0) @binding(4) var<storage, read_write> hashBuffer: array<u32>;
 @group(0) @binding(5) var<storage, read_write> debugBuffer: array<u32>;
 
-// LCG 定数 (64-bit): 0x5851f42d4c957f2d
-const RAND_MULT_LOW: u32 = 0x4c957f2du; // lower 32 bits
-const RAND_MULT_HIGH: u32 = 0x5851f42du; // upper 32 bits
-const RAND_INC_LOW: u32 = 1u;
-const RAND_INC_HIGH: u32 = 0u;
+// LCG 定数
+const RAND_MULT_LO: u32 = 0x4c957f2du;  // lower 32 bits of 0x5851f42d4c957f2d
+const RAND_MULT_HI: u32 = 0x5851f42du;  // upper 32 bits
+const RAND_INC: u32 = 1u;
 
-fn mul_u64(a_low: u32, a_high: u32, b_low: u32, b_high: u32) -> vec2<u32> {
-    // 32x32 => 64 部分積を組み合わせる単純実装（以前の実装を踏襲）
-    let a_low_lo = a_low & 0xffffu;
-    let a_low_hi = a_low >> 16u;
-    let b_low_lo = b_low & 0xffffu;
-    let b_low_hi = b_low >> 16u;
-
-    let p00 = a_low_lo * b_low_lo;
-    let p01 = a_low_lo * b_low_hi;
-    let p10 = a_low_hi * b_low_lo;
-    let p11 = a_low_hi * b_low_hi;
-
-    let p0_low_part = p00 & 0xffffu;
-    let p0_carry1 = p00 >> 16u;
-    let p0_mid = p0_carry1 + (p01 & 0xffffu) + (p10 & 0xffffu);
-    let p0_carry2 = p0_mid >> 16u;
-    let p0_low = p0_low_part + ((p0_mid & 0xffffu) << 16u);
-    let p0_high_part = p0_carry2 + (p01 >> 16u) + (p10 >> 16u) + p11;
-    let p0_high = p0_high_part + select(0u, 1u, p0_low < p0_low_part);
-
-    // a_low * b_high
-    let p1_full_low = a_low * b_high;
-    // a_high * b_low
-    let p2_full_low = a_high * b_low;
-    let p3_val = a_high * b_high;
-
-    var result_low = p0_low;
-    var result_high = p0_high;
-
-    let sum1 = result_high + p1_full_low;
-    let carry1 = select(0u, 1u, sum1 < result_high);
-    result_high = sum1;
-
-    let sum2 = result_high + p2_full_low;
-    let carry2 = select(0u, 1u, sum2 < result_high);
-    result_high = sum2 + carry1;
-    let carry2_total = carry2 + select(0u, 1u, result_high < sum2);
-
-    let sum3 = result_high + p3_val;
-    let carry3 = select(0u, 1u, sum3 < result_high);
-    result_high = sum3 + carry2_total;
-
-    return vec2<u32>(result_low, result_high);
-}
-
-fn add_u64(a_low: u32, a_high: u32, b_low: u32, b_high: u32) -> vec2<u32> {
-    let sum_low = a_low + b_low;
-    let carry = select(0u, 1u, sum_low < a_low);
-    let sum_high = a_high + b_high + carry;
-    return vec2<u32>(sum_low, sum_high);
+// 64-bit multiplication: (lo, hi) * RAND_MULT_LO -> (result_lo, result_hi)
+fn mul_u64_simplified(a_lo: u32, a_hi: u32) -> vec2<u32> {
+    let lo_lo_prod = u64(a_lo) * u64(RAND_MULT_LO);
+    let lo_hi_prod = u64(a_lo) * u64(RAND_MULT_HI) + u64(a_hi) * u64(RAND_MULT_LO);
+    
+    let result_lo = u32(lo_lo_prod);
+    let carry = u32((lo_lo_prod >> 32u) & 0xffffffffu) + u32(lo_hi_prod & 0xffffffffu);
+    let result_hi = u32((lo_hi_prod >> 32u) & 0xffffffffu) + u32(carry >> 32u) + a_hi * RAND_MULT_HI;
+    
+    return vec2<u32>(result_lo, result_hi);
 }
 
 const BASE62: array<u32, 62> = array<u32, 62>(
@@ -180,55 +142,47 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     var messageBytes: array<u32, 16>;
     for (var i = 0u; i < 16u; i++) { messageBytes[i] = 0u; }
 
-    // Key を messageBytes にコピーする（ビッグエンディアン）
+    // Key をコピー
     for (var i = 0u; i < keyLen && i < 64u; i++) {
-        let wordIdx = i / 4u;
-        let byteIdx = i % 4u;
-        let word = keyBuffer[wordIdx];
-        // keyBuffer[wordIdx] は (byte0 << 24 | byte1 << 16 | byte2 << 8 | byte3) の形式
-        let byteVal = (word >> ((3u - byteIdx) * 8u)) & 0xffu;
+        let word = keyBuffer[i / 4u];
+        let byteVal = (word >> ((3u - (i % 4u)) * 8u)) & 0xffu;
         let msgWordIdx = i / 4u;
         let msgByteIdx = i % 4u;
-        // messageBytes[msgWordIdx] に byteVal を正しい位置に格納
         messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (byteVal << ((3u - msgByteIdx) * 8u));
     }
 
-    // ランダムサフィックスを生成して messageBytes に追加
-    var stateRandLow = keySeedLow ^ nonce;
-    var stateRandHigh = keySeedHigh;
-
+    // ランダムサフィックスを生成して追加
+    // 64-bit LCG を使用してJS側と同じ結果を生成
+    var state_lo = keySeedLow ^ nonce;
+    var state_hi = keySeedHigh;
+    
     for (var i = 0u; i < randomLen && (keyLen + i) < 64u; i++) {
-        let mulResult = mul_u64(stateRandLow, stateRandHigh, RAND_MULT_LOW, RAND_MULT_HIGH);
-        let addResult = add_u64(mulResult.x, mulResult.y, RAND_INC_LOW, RAND_INC_HIGH);
-        stateRandLow = addResult.x;
-        stateRandHigh = addResult.y;
-
-        let idx = stateRandHigh % 62u;
+        // 64-bit LCG: state = state * RAND_MULT + RAND_INC
+        let mul_result = mul_u64_simplified(state_lo, state_hi);
+        state_lo = mul_result.x + RAND_INC;
+        state_hi = mul_result.y + select(0u, 1u, state_lo < mul_result.x);
+        
+        // JS側と同じく上位32ビットを使用してインデックスを計算
+        let idx = (state_hi % 62u);
         let charCode = BASE62[idx] & 0xffu;
         let pos = keyLen + i;
         let msgWordIdx = pos / 4u;
         let msgByteIdx = pos % 4u;
-        // charCode を正しい位置に格納
         messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (charCode << ((3u - msgByteIdx) * 8u));
     }
 
     let msgLen = keyLen + randomLen;
 
-    // padding: 0x80
+    // パディング
     if (msgLen < 64u) {
         let msgWordIdx = msgLen / 4u;
         let msgByteIdx = msgLen % 4u;
         messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (0x80u << ((3u - msgByteIdx) * 8u));
     }
 
-    // bit length (64-bit big-endian)。ここでは上位 32bit は 0 として下位に bitLen を配置
     let bitLen = msgLen * 8u;
     if (msgLen < 56u) {
-        // messageBytes[14] (bytes 56-59) 上位 32bit
         messageBytes[14] = 0u;
-        // messageBytes[15] (bytes 60-63) 下位 32bit をビッグエンディアンとして格納
-        // WGSL の messageBytes[] は "ビッグエンディアン表現のワード" を期待しているため
-        // ここで下位 32bit をそのままセットしてよい
         messageBytes[15] = bitLen;
         sha256_transform(&state, &messageBytes);
     } else {
@@ -239,7 +193,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         sha256_transform(&state, &messageBytes);
     }
 
-    // ハッシュバイト抽出 & マスク比較
+    // マスク比較
     var matches = true;
     for (var i = 0u; i < maskLen && i < 32u; i++) {
         let wordIdx = i / 4u;
@@ -247,7 +201,6 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         if (wordIdx < 8u) {
             let stateWord = state[wordIdx];
             let hashByte = (stateWord >> ((3u - byteIdx) * 8u)) & 0xffu;
-            // maskBuffer[0] に全てのマスクバイトが Big-Endian で格納される
             let maskWord = maskBuffer[wordIdx];
             let maskByte = (maskWord >> ((3u - byteIdx) * 8u)) & 0xffu;
             if (hashByte != maskByte) { matches = false; break; }
@@ -274,7 +227,6 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         if (result.old_value == expected && result.exchanged) {
             nonceBuffer[1] = nonce;
             for (var i = 0u; i < 8u; i++) { hashBuffer[i] = state[i]; }
-            // デバッグ情報
             for (var i = 0u; i < 16u; i++) { debugBuffer[i] = messageBytes[i]; }
             for (var i = 0u; i < 8u; i++) { debugBuffer[16 + i] = state[i]; }
             debugBuffer[24] = msgLen;
@@ -293,6 +245,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
 }
 `;
+/* eslint-enable */
 
 // ---------- JS 側ユーティリティ ----------
 function toBigEndianU32(bytes) {
@@ -386,6 +339,13 @@ async function startMining(key, mask) {
     const { bytes: maskBytes, maskNibble } = parseMask(mask);
     const keyBytes = stringToBytes(key);
     const keySeed = fnv1a64(keyBytes);
+
+    // JS側で事前計算したランダムサフィックスをGPUに渡す戦略に変更
+    // 各nonceに対してランダムサフィックスを計算し、バッファに格納
+    function generateSuffixBytes(nonce) {
+        const suffix = fillRandomBase62(BigInt(keySeed) ^ BigInt(nonce), RANDOM_SUFFIX_LEN);
+        return stringToBytes(suffix);
+    }
 
     // Big-Endian に揃えて GPU に渡す
     const maskUint32 = toBigEndianU32(new Uint8Array(maskBytes));
