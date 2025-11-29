@@ -17,27 +17,74 @@ const sha256Shader = `
 // 定数（u64リテラルは直接書けないため、分割して計算）
 const RAND_MULT_LOW: u32 = 0xda3e39cbu;
 const RAND_MULT_HIGH: u32 = 0x5851f42du;
-const RAND_INC: u32 = 1u;
+const RAND_INC_LOW: u32 = 1u;
+const RAND_INC_HIGH: u32 = 0u;
 
-// 64ビット乗算（a * b を計算、b = b_high * 2^32 + b_low）
-fn mul_u64(a: u64, b_low: u32, b_high: u32) -> u64 {
-    let mask32: u64 = 0xffffffffu;
-    let a_low = u32(a & mask32);
-    let a_high = u32((a >> 32u) & mask32);
+// 64ビット乗算（a_low, a_high と b_low, b_high を掛けて、結果を low, high で返す）
+// 結果は2つのu32値として返す（low, high）
+// WGSLではu64型がサポートされていないため、u32のみで実装
+fn mul_u64(a_low: u32, a_high: u32, b_low: u32, b_high: u32) -> vec2<u32> {
+    // 32ビット乗算の結果を64ビットとして扱う
+    // a_low * b_low を計算（結果は最大64ビット）
+    let a_low_lo = a_low & 0xffffu;
+    let a_low_hi = a_low >> 16u;
+    let b_low_lo = b_low & 0xffffu;
+    let b_low_hi = b_low >> 16u;
     
-    // 分割乗算
-    let p0 = u64(a_low) * u64(b_low);
-    let p1 = u64(a_low) * u64(b_high);
-    let p2 = u64(a_high) * u64(b_low);
-    let p3 = u64(a_high) * u64(b_high);
+    let p00 = a_low_lo * b_low_lo;
+    let p01 = a_low_lo * b_low_hi;
+    let p10 = a_low_hi * b_low_lo;
+    let p11 = a_low_hi * b_low_hi;
+    
+    // p0 = a_low * b_low を64ビットとして計算
+    let p0_low_part = p00 & 0xffffu;
+    let p0_carry1 = p00 >> 16u;
+    let p0_mid = p0_carry1 + (p01 & 0xffffu) + (p10 & 0xffffu);
+    let p0_carry2 = p0_mid >> 16u;
+    let p0_low = p0_low_part + ((p0_mid & 0xffffu) << 16u);
+    let p0_high_part = p0_carry2 + (p01 >> 16u) + (p10 >> 16u) + p11;
+    let p0_high = p0_high_part + select(0u, 1u, p0_low < p0_low_part);
+    
+    // a_low * b_high (結果は最大64ビット)
+    let p1_full_low = a_low * b_high;
+    let p1_full_high = 0u; // a_low * b_high は64ビットを超えない
+    
+    // a_high * b_low (結果は最大64ビット)
+    let p2_full_low = a_high * b_low;
+    let p2_full_high = 0u; // a_high * b_low は64ビットを超えない
+    
+    // a_high * b_high (結果は32ビット)
+    let p3_val = a_high * b_high;
     
     // 結果を組み合わせ
-    let low = p0 & mask32;
-    let mid1 = (p0 >> 32u) + (p1 & mask32);
-    let mid2 = (mid1 >> 32u) + (p1 >> 32u) + (p2 & mask32);
-    let high = (mid2 >> 32u) + (p2 >> 32u) + p3;
+    var result_low = p0_low;
+    var result_high = p0_high;
     
-    return (high << 32u) | (mid2 & mask32);
+    // p1_full_lowを加算
+    let sum1 = result_high + p1_full_low;
+    let carry1 = select(0u, 1u, sum1 < result_high);
+    result_high = sum1;
+    
+    // p2_full_lowを加算
+    let sum2 = result_high + p2_full_low;
+    let carry2 = select(0u, 1u, sum2 < result_high);
+    result_high = sum2 + carry1;
+    let carry2_total = carry2 + select(0u, 1u, result_high < sum2);
+    
+    // p3_valを加算
+    let sum3 = result_high + p3_val;
+    let carry3 = select(0u, 1u, sum3 < result_high);
+    result_high = sum3 + carry2_total;
+    
+    return vec2<u32>(result_low, result_high);
+}
+
+// 64ビット加算（a_low, a_high + b_low, b_high）
+fn add_u64(a_low: u32, a_high: u32, b_low: u32, b_high: u32) -> vec2<u32> {
+    let sum_low = a_low + b_low;
+    let carry = select(0u, 1u, sum_low < a_low);
+    let sum_high = a_high + b_high + carry;
+    return vec2<u32>(sum_low, sum_high);
 }
 const BASE62: array<u8, 62> = array<u8, 62>(
     48u, 49u, 50u, 51u, 52u, 53u, 54u, 55u, 56u, 57u,
@@ -130,13 +177,14 @@ fn sha256_transform(state: ptr<function, array<u32, 8>>, chunk: ptr<function, ar
 fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     let index = globalId.x;
     let startNonce = nonceBuffer[0];
-    let nonce = startNonce + u32(index);
-    let keySeed = u64(nonceBuffer[2]) | (u64(nonceBuffer[3]) << 32u);
-    let keyLen = u32(nonceBuffer[4]);
-    let randomLen = u32(nonceBuffer[5]);
-    let maskLen = u32(nonceBuffer[6]);
-    let hasNibble = u32(nonceBuffer[7]);
-    let maskNibble = u32(nonceBuffer[8]);
+    let nonce = startNonce + index;
+    let keySeedLow = nonceBuffer[2];
+    let keySeedHigh = nonceBuffer[3];
+    let keyLen = nonceBuffer[4];
+    let randomLen = nonceBuffer[5];
+    let maskLen = nonceBuffer[6];
+    let hasNibble = nonceBuffer[7];
+    let maskNibble = nonceBuffer[8];
     
     // 結果が見つかった場合は早期終了
     if (resultBuffer[0] != 0u) {
@@ -164,10 +212,20 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
     
     // ランダム部分を生成（BASE62）
-    var stateRand = keySeed ^ u64(nonce);
+    // stateRand = keySeed ^ nonce (64ビット)
+    // nonceはu32なので、keySeedLowとXORするだけ
+    var stateRandLow = keySeedLow ^ nonce;
+    var stateRandHigh = keySeedHigh;
+    
     for (var i = 0u; i < randomLen && (keyLen + i) < 64u; i++) {
-        stateRand = mul_u64(stateRand, RAND_MULT_LOW, RAND_MULT_HIGH) + u64(RAND_INC);
-        let idx = u32((stateRand >> 32u) % 62u);
+        // stateRand = stateRand * RAND_MULT + RAND_INC
+        let mulResult = mul_u64(stateRandLow, stateRandHigh, RAND_MULT_LOW, RAND_MULT_HIGH);
+        let addResult = add_u64(mulResult.x, mulResult.y, RAND_INC_LOW, RAND_INC_HIGH);
+        stateRandLow = addResult.x;
+        stateRandHigh = addResult.y;
+        
+        // idx = (stateRand >> 32) % 62
+        let idx = (stateRandHigh % 62u);
         message[keyLen + i] = BASE62[idx];
     }
     
@@ -179,13 +237,14 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
     
     // 長さを追加（ビット長、ビッグエンディアン、最後の8バイト）
-    let bitLen = u64(msgLen) * 8u;
+    // bitLen = msgLen * 8 (最大16*8=128ビット、u32で十分)
+    let bitLen = msgLen * 8u;
     if (msgLen < 56u) {
         // 1ブロックで処理可能
-        message[56] = u8((bitLen >> 56u) & 0xffu);
-        message[57] = u8((bitLen >> 48u) & 0xffu);
-        message[58] = u8((bitLen >> 40u) & 0xffu);
-        message[59] = u8((bitLen >> 32u) & 0xffu);
+        message[56] = 0u;
+        message[57] = 0u;
+        message[58] = 0u;
+        message[59] = 0u;
         message[60] = u8((bitLen >> 24u) & 0xffu);
         message[61] = u8((bitLen >> 16u) & 0xffu);
         message[62] = u8((bitLen >> 8u) & 0xffu);
@@ -200,10 +259,10 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         for (var i = 0u; i < 56u; i++) {
             message[i] = 0u;
         }
-        message[56] = u8((bitLen >> 56u) & 0xffu);
-        message[57] = u8((bitLen >> 48u) & 0xffu);
-        message[58] = u8((bitLen >> 40u) & 0xffu);
-        message[59] = u8((bitLen >> 32u) & 0xffu);
+        message[56] = 0u;
+        message[57] = 0u;
+        message[58] = 0u;
+        message[59] = 0u;
         message[60] = u8((bitLen >> 24u) & 0xffu);
         message[61] = u8((bitLen >> 16u) & 0xffu);
         message[62] = u8((bitLen >> 8u) & 0xffu);
@@ -411,12 +470,12 @@ async function startMining(key, mask) {
         
         // バッファの作成
         const maskGpuBuffer = device.createBuffer({
-            size: maskBufferPadded.byteLength,
+            size: maskUint32.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         });
         
         const keyGpuBuffer = device.createBuffer({
-            size: keyBufferPadded.byteLength,
+            size: keyUint32.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         });
         
@@ -435,9 +494,9 @@ async function startMining(key, mask) {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         });
         
-        // バッファにデータを書き込み
-        device.queue.writeBuffer(maskGpuBuffer, 0, maskBufferPadded);
-        device.queue.writeBuffer(keyGpuBuffer, 0, keyBufferPadded);
+        // バッファにデータを書き込み（Uint32Arrayとして）
+        device.queue.writeBuffer(maskGpuBuffer, 0, maskUint32);
+        device.queue.writeBuffer(keyGpuBuffer, 0, keyUint32);
         
         // バインドグループの作成
         const bindGroup = device.createBindGroup({
