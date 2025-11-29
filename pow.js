@@ -30,12 +30,25 @@ const RAND_INC: u32 = 1u;
 
 // 64-bit multiplication: (lo, hi) * RAND_MULT_LO -> (result_lo, result_hi)
 fn mul_u64_simplified(a_lo: u32, a_hi: u32) -> vec2<u32> {
-    let lo_lo_prod = u64(a_lo) * u64(RAND_MULT_LO);
-    let lo_hi_prod = u64(a_lo) * u64(RAND_MULT_HI) + u64(a_hi) * u64(RAND_MULT_LO);
+    // (a_lo, a_hi) * (RAND_MULT_LO, RAND_MULT_HI)
+    // Using 16-bit splits to avoid overflow: each u32 = (hi16 << 16) | lo16
+    let a_lo_lo = a_lo & 0xffffu;
+    let a_lo_hi = (a_lo >> 16u) & 0xffffu;
+    let m_lo = RAND_MULT_LO & 0xffffu;
+    let m_hi = (RAND_MULT_LO >> 16u) & 0xffffu;
     
-    let result_lo = u32(lo_lo_prod);
-    let carry = u32((lo_lo_prod >> 32u) & 0xffffffffu) + u32(lo_hi_prod & 0xffffffffu);
-    let result_hi = u32((lo_hi_prod >> 32u) & 0xffffffffu) + u32(carry >> 32u) + a_hi * RAND_MULT_HI;
+    // a_lo_lo * m_lo
+    let p1 = a_lo_lo * m_lo;
+    // a_lo_hi * m_lo
+    let p2 = a_lo_hi * m_lo;
+    // a_lo_lo * m_hi
+    let p3 = a_lo_lo * m_hi;
+    // a_lo_hi * m_hi
+    let p4 = a_lo_hi * m_hi;
+    
+    // Sum: (p4 << 32) + (p3 + p2) << 16 + p1
+    let result_lo = p1 + (p2 << 16u);
+    let result_hi = p4 + (p2 >> 16u) + (p3 >> 16u) + a_lo * RAND_MULT_HI + a_hi * RAND_MULT_LO;
     
     return vec2<u32>(result_lo, result_hi);
 }
