@@ -360,20 +360,22 @@ async function startMining(key, mask) {
         const keySeed = fnv1a64(keyBytes);
         const RANDOM_SUFFIX_LEN = 14;
         
-        // マスクバッファ（u8配列）
-        const maskBuffer = new Uint8Array(maskBytes);
+        // マスクバッファ（u8配列）- 4の倍数にパディング
+        const maskBufferPadded = new Uint8Array(Math.ceil(maskBytes.length / 4) * 4);
+        maskBufferPadded.set(maskBytes);
         
-        // キーバッファ（u8配列）
-        const keyBuffer = new Uint8Array(keyBytes);
+        // キーバッファ（u8配列）- 4の倍数にパディング
+        const keyBufferPadded = new Uint8Array(Math.ceil(keyBytes.length / 4) * 4);
+        keyBufferPadded.set(keyBytes);
         
         // バッファの作成
         const maskGpuBuffer = device.createBuffer({
-            size: maskBuffer.byteLength,
+            size: maskBufferPadded.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         });
         
         const keyGpuBuffer = device.createBuffer({
-            size: keyBuffer.byteLength,
+            size: keyBufferPadded.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         });
         
@@ -393,8 +395,8 @@ async function startMining(key, mask) {
         });
         
         // バッファにデータを書き込み
-        device.queue.writeBuffer(maskGpuBuffer, 0, maskBuffer);
-        device.queue.writeBuffer(keyGpuBuffer, 0, keyBuffer);
+        device.queue.writeBuffer(maskGpuBuffer, 0, maskBufferPadded);
+        device.queue.writeBuffer(keyGpuBuffer, 0, keyBufferPadded);
         
         // バインドグループの作成
         const bindGroup = device.createBindGroup({
