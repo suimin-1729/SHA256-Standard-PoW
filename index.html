@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU PoW System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>WebGPU Proof of Work System</h1>
+            <p class="subtitle">GPUを使用したハッシュ計算システム</p>
+        </header>
+
+        <div id="gpu-check" class="gpu-check">
+            <p>GPUを検出中...</p>
+        </div>
+
+        <main id="main-content" class="hidden">
+            <form id="pow-form" class="pow-form">
+                <div class="form-group">
+                    <label for="key-input">Key (プレフィックス):</label>
+                    <input 
+                        type="text" 
+                        id="key-input" 
+                        name="key" 
+                        placeholder="例: AB" 
+                        required
+                        maxlength="2"
+                    >
+                    <small>2文字のプレフィックスを入力してください</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="mask-input">Mask (16進数):</label>
+                    <input 
+                        type="text" 
+                        id="mask-input" 
+                        name="mask" 
+                        placeholder="例: 0000, 00ff, abcd" 
+                        required
+                        pattern="[0-9a-fA-F]+"
+                    >
+                    <small>16進数文字列を入力してください（例: 0000, 00ff）</small>
+                </div>
+
+                <button type="submit" id="start-btn" class="btn btn-primary">
+                    計算開始
+                </button>
+                <button type="button" id="stop-btn" class="btn btn-secondary hidden">
+                    停止
+                </button>
+            </form>
+
+            <div id="progress-section" class="progress-section hidden">
+                <h2>進捗状況</h2>
+                <div class="progress-info">
+                    <div class="info-item">
+                        <span class="label">現在のIterations (Nonce):</span>
+                        <span id="current-nonce" class="value">0</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">計算速度:</span>
+                        <span id="hash-rate" class="value">0</span>
+                        <span class="unit">hashes/sec</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">経過時間:</span>
+                        <span id="elapsed-time" class="value">0.0</span>
+                        <span class="unit">秒</span>
+                    </div>
+                </div>
+                <div class="progress-bar-container">
+                    <div id="progress-bar" class="progress-bar"></div>
+                </div>
+            </div>
+
+            <div id="result-section" class="result-section hidden">
+                <h2>結果</h2>
+                <div class="result-info">
+                    <div class="result-item">
+                        <span class="label">見つかったNonce:</span>
+                        <span id="result-nonce" class="value">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Answer:</span>
+                        <span id="result-answer" class="value">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Hash:</span>
+                        <span id="result-hash" class="value hash-value">-</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">計算時間:</span>
+                        <span id="result-time" class="value">-</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="pow.js"></script>
+</body>
+</html>
+
