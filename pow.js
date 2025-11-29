@@ -15,8 +15,8 @@ const sha256Shader = `
 @group(0) @binding(4) var<storage, read_write> hashBuffer: array<u8>;
 
 // 定数
-const RAND_MULT: u64 = 6364136223846793005u;
-const RAND_INC: u64 = 1u;
+const RAND_MULT: u64 = 0x5851f42dda3e39cbu64;
+const RAND_INC: u64 = 1u64;
 const BASE62: array<u8, 62> = array<u8, 62>(
     48u, 49u, 50u, 51u, 52u, 53u, 54u, 55u, 56u, 57u,
     65u, 66u, 67u, 68u, 69u, 70u, 71u, 72u, 73u, 74u, 75u, 76u, 77u, 78u, 79u, 80u, 81u, 82u, 83u, 84u, 85u, 86u, 87u, 88u, 89u, 90u,
