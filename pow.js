@@ -86,7 +86,7 @@ fn add_u64(a_low: u32, a_high: u32, b_low: u32, b_high: u32) -> vec2<u32> {
     let sum_high = a_high + b_high + carry;
     return vec2<u32>(sum_low, sum_high);
 }
-const BASE62: array<u8, 62> = array<u8, 62>(
+const BASE62: array<u32, 62> = array<u32, 62>(
     48u, 49u, 50u, 51u, 52u, 53u, 54u, 55u, 56u, 57u,
     65u, 66u, 67u, 68u, 69u, 70u, 71u, 72u, 73u, 74u, 75u, 76u, 77u, 78u, 79u, 80u, 81u, 82u, 83u, 84u, 85u, 86u, 87u, 88u, 89u, 90u,
     97u, 98u, 99u, 100u, 101u, 102u, 103u, 104u, 105u, 106u, 107u, 108u, 109u, 110u, 111u, 112u, 113u, 114u, 115u, 116u, 117u, 118u, 119u, 120u, 121u, 122u
@@ -226,7 +226,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         
         // idx = (stateRand >> 32) % 62
         let idx = (stateRandHigh % 62u);
-        message[keyLen + i] = BASE62[idx];
+        message[keyLen + i] = u8(BASE62[idx]);
     }
     
     let msgLen = keyLen + randomLen;
