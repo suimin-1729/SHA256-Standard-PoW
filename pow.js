@@ -200,16 +200,16 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         messageBytes[i] = 0u;
     }
     
-    // キーをコピー（u32からバイトを抽出してメッセージに配置）
+    // キーをコピー
     let keyWords = (keyLen + 3u) / 4u;
     for (var i = 0u; i < keyLen && i < 64u; i++) {
         let wordIdx = i / 4u;
         let byteIdx = i % 4u;
         if (wordIdx < keyWords) {
             let word = keyBuffer[wordIdx];
-            // リトルエンディアンでバイトを抽出（JavaScriptのUint32Arrayはリトルエンディアン）
+            // リトルエンディアンでバイトを抽出
             let byteVal = (word >> (byteIdx * 8u)) & 0xffu;
-            // メッセージにビッグエンディアンで配置（SHA-256の要求）
+            // メッセージにビッグエンディアンで配置
             let msgWordIdx = i / 4u;
             let msgByteIdx = i % 4u;
             messageBytes[msgWordIdx] = messageBytes[msgWordIdx] | (byteVal << ((3u - msgByteIdx) * 8u));
