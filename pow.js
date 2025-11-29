@@ -714,6 +714,8 @@ async function startMining(key, mask) {
 
                 // hashArrayを先に定義する
                 const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
+                console.log('hashBuffer u32 values:', Array.from(hashUint32).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
+
                 const hashArray = new Uint8Array(32);
                 for (let i = 0; i < 8; i++) {
                     const word = hashUint32[i];
