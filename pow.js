@@ -254,9 +254,16 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         // 1ブロックで処理可能
         // 長さを最後の8バイト（インデックス56-63）に配置
         // messageBytes[14] = バイト56-59, messageBytes[15] = バイト60-63
-        // ビッグエンディアンで配置: バイト56-59は0、バイト60-63にbitLen
+        // ビッグエンディアンで配置: bitLenは最大128ビット（16バイト * 8）
+        // 64ビットの長さフィールドとして、上位32ビットは0、下位32ビットにbitLen
+        // バイト56-59: 0x00000000
+        // バイト60-63: bitLenをビッグエンディアンで配置
         messageBytes[14] = 0u; // バイト56-59は0（上位32ビット）
-        messageBytes[15] = bitLen; // バイト60-63にbitLen（下位32ビット、ビッグエンディアン）
+        // バイト60-63にbitLenをビッグエンディアンで配置
+        // bitLenはu32なので、バイト60が最上位、バイト63が最下位
+        messageBytes[15] = (bitLen << 24u) | ((bitLen & 0xff00u) << 8u) | ((bitLen & 0xff0000u) >> 8u) | (bitLen >> 24u);
+        // 実際には、bitLenをそのまま配置すれば良い（u32は既にビッグエンディアンとして解釈される）
+        // しかし、正しくはバイト単位で配置する必要がある
         
         sha256_transform(&state, &messageBytes);
     } else {
@@ -269,7 +276,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         }
         // 長さを最後の8バイトに配置
         messageBytes[14] = 0u; // バイト56-59は0
-        messageBytes[15] = bitLen; // バイト60-63にbitLen
+        messageBytes[15] = (bitLen << 24u) | ((bitLen & 0xff00u) << 8u) | ((bitLen & 0xff0000u) >> 8u) | (bitLen >> 24u);
         
         sha256_transform(&state, &messageBytes);
     }
