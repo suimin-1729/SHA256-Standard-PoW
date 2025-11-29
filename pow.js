@@ -14,9 +14,30 @@ const sha256Shader = `
 @group(0) @binding(3) var<storage, read_write> nonceBuffer: array<u32>;
 @group(0) @binding(4) var<storage, read_write> hashBuffer: array<u8>;
 
-// 定数
-const RAND_MULT: u64 = 0x5851f42dda3e39cbu64;
+// 定数（u64リテラルは直接書けないため、分割して計算）
+const RAND_MULT_LOW: u32 = 0xda3e39cbu;
+const RAND_MULT_HIGH: u32 = 0x5851f42du;
 const RAND_INC: u64 = 1u64;
+
+// 64ビット乗算（a * b を計算、b = b_high * 2^32 + b_low）
+fn mul_u64(a: u64, b_low: u32, b_high: u32) -> u64 {
+    let a_low = u32(a & 0xffffffffu64);
+    let a_high = u32((a >> 32u) & 0xffffffffu64);
+    
+    // 分割乗算
+    let p0 = u64(a_low) * u64(b_low);
+    let p1 = u64(a_low) * u64(b_high);
+    let p2 = u64(a_high) * u64(b_low);
+    let p3 = u64(a_high) * u64(b_high);
+    
+    // 結果を組み合わせ
+    let low = p0 & 0xffffffffu64;
+    let mid1 = (p0 >> 32u) + (p1 & 0xffffffffu64);
+    let mid2 = (mid1 >> 32u) + (p1 >> 32u) + (p2 & 0xffffffffu64);
+    let high = (mid2 >> 32u) + (p2 >> 32u) + p3;
+    
+    return (high << 32u) | (mid2 & 0xffffffffu64);
+}
 const BASE62: array<u8, 62> = array<u8, 62>(
     48u, 49u, 50u, 51u, 52u, 53u, 54u, 55u, 56u, 57u,
     65u, 66u, 67u, 68u, 69u, 70u, 71u, 72u, 73u, 74u, 75u, 76u, 77u, 78u, 79u, 80u, 81u, 82u, 83u, 84u, 85u, 86u, 87u, 88u, 89u, 90u,
@@ -138,7 +159,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     // ランダム部分を生成（BASE62）
     var stateRand = keySeed ^ u64(nonce);
     for (var i = 0u; i < randomLen && (keyLen + i) < 64u; i++) {
-        stateRand = stateRand * RAND_MULT + RAND_INC;
+        stateRand = mul_u64(stateRand, RAND_MULT_LOW, RAND_MULT_HIGH) + RAND_INC;
         let idx = u32((stateRand >> 32u) % 62u);
         message[keyLen + i] = BASE62[idx];
     }
