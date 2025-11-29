@@ -221,6 +221,8 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
     
     // ランダム部分を生成（BASE62）
+    // stateRand = keySeed ^ nonce (64ビット)
+    // nonceはu32なので、keySeedLowとXORするだけ
     var stateRandLow = keySeedLow ^ nonce;
     var stateRandHigh = keySeedHigh;
     
@@ -719,14 +721,25 @@ async function startMining(key, mask) {
                 // 実際にハッシュ化されたメッセージを再構築
                 // nonce=262144で計算されたメッセージを再構築
                 const actualNonce = nonceArray[1];
-                console.log('Actual nonce (from nonceBuffer):', actualNonce);
-                console.log('Debug nonce:', debugUint32[26]);
+                const actualKeySeed = keySeed;
+                const actualStateRand = actualKeySeed ^ BigInt(actualNonce);
+                console.log('Actual stateRand (keySeed ^ nonce):', actualStateRand.toString(16));
 
-                // 実際のnonceでAnswerを再生成
-                const actualRandomSuffix = fillRandomBase62(keySeed ^ BigInt(actualNonce), 14);
+                // 実際のAnswerのランダム部分を生成
+                const actualRandomSuffix = fillRandomBase62(actualStateRand, 14);
+                console.log('Actual random suffix:', actualRandomSuffix);
                 const actualAnswer = key + actualRandomSuffix;
                 console.log('Actual Answer:', actualAnswer);
                 console.log('Debug Message as string:', String.fromCharCode(...messageBytes.slice(0, debugUint32[24])));
+
+                // 実際のAnswerをSHA-256で計算
+                const actualAnswerBytes = stringToBytes(actualAnswer);
+                console.log('Actual Answer bytes:', Array.from(actualAnswerBytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
+                // 実際のAnswerのSHA-256ハッシュを計算（簡易版、正確にはWeb Crypto APIを使用）
+                // ただし、ここでは確認のため、実際のAnswerが正しいか確認する
+                console.log('Actual Answer length:', actualAnswer.length);
+                console.log('Expected Answer length:', key.length + 14);
 
                 // hashArrayを先に定義する
                 const hashArray = new Uint8Array(32);
