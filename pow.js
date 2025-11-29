@@ -718,6 +718,16 @@ async function startMining(key, mask) {
                 const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
                 console.log('hashBuffer u32 values:', Array.from(hashUint32).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
 
+                // hashArrayを定義（751行目の前に追加）
+                const hashArray = new Uint8Array(32);
+                for (let i = 0; i < 8; i++) {
+                    const word = hashUint32[i];
+                    hashArray[i * 4] = (word >> 24) & 0xff;
+                    hashArray[i * 4 + 1] = (word >> 16) & 0xff;
+                    hashArray[i * 4 + 2] = (word >> 8) & 0xff;
+                    hashArray[i * 4 + 3] = word & 0xff;
+                }
+
                 // 実際にハッシュ化されたメッセージを再構築
                 // nonce=262144で計算されたメッセージを再構築
                 const actualNonce = nonceArray[1];
