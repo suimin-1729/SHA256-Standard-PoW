@@ -10,7 +10,7 @@ let lastTime = null;
 const sha256Shader = `
 @group(0) @binding(0) var<storage, read> maskBuffer: array<u32>;
 @group(0) @binding(1) var<storage, read> keyBuffer: array<u32>;
-@group(0) @binding(2) var<storage, read_write> resultBuffer: array<u32>;
+@group(0) @binding(2) var<storage, read_write> resultBuffer: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> nonceBuffer: array<u32>;
 @group(0) @binding(4) var<storage, read_write> hashBuffer: array<u32>;
 
@@ -184,7 +184,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     let maskNibble = nonceBuffer[8];
     
     // 結果が見つかった場合は早期終了
-    if (resultBuffer[0] != 0u) {
+    if (atomicLoad(&resultBuffer[0]) != 0u) {
         return;
     }
     
@@ -332,8 +332,8 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         // atomic compare and exchange
         var expected = 0u;
         var desired = 1u;
-        var old = atomicCompareExchangeWeak(&resultBuffer[0], expected, desired);
-        if (old == expected) {
+        var result = atomicCompareExchangeWeak(&resultBuffer[0], expected, desired);
+        if (result.old_value == expected && result.exchanged) {
             nonceBuffer[1] = nonce;
             // ハッシュをu32配列に変換（ビッグエンディアン）
             for (var i = 0u; i < 8u; i++) {
