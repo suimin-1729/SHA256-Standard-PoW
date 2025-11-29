@@ -712,10 +712,23 @@ async function startMining(key, mask) {
                 }
                 console.log('Hash from SHA-256 State:', Array.from(stateHashArray).map(b => b.toString(16).padStart(2, '0')).join(''));
 
-                // hashArrayを先に定義する
+                // hashBuffer u32 valuesを表示
                 const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
                 console.log('hashBuffer u32 values:', Array.from(hashUint32).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
 
+                // 実際にハッシュ化されたメッセージを再構築
+                // nonce=262144で計算されたメッセージを再構築
+                const actualNonce = nonceArray[1];
+                console.log('Actual nonce (from nonceBuffer):', actualNonce);
+                console.log('Debug nonce:', debugUint32[26]);
+
+                // 実際のnonceでAnswerを再生成
+                const actualRandomSuffix = fillRandomBase62(keySeed ^ BigInt(actualNonce), 14);
+                const actualAnswer = key + actualRandomSuffix;
+                console.log('Actual Answer:', actualAnswer);
+                console.log('Debug Message as string:', String.fromCharCode(...messageBytes.slice(0, debugUint32[24])));
+
+                // hashArrayを先に定義する
                 const hashArray = new Uint8Array(32);
                 for (let i = 0; i < 8; i++) {
                     const word = hashUint32[i];
