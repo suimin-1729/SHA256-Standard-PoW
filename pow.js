@@ -13,6 +13,8 @@ const sha256Shader = `
 @group(0) @binding(2) var<storage, read_write> resultBuffer: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> nonceBuffer: array<u32>;
 @group(0) @binding(4) var<storage, read_write> hashBuffer: array<u32>;
+// バインディングにデバッグバッファを追加（5番目のバインディングとして）
+@group(0) @binding(5) var<storage, read_write> debugBuffer: array<u32>;
 
 // 定数（u64リテラルは直接書けないため、分割して計算）
 const RAND_MULT_LOW: u32 = 0xda3e39cbu;
@@ -346,6 +348,24 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             return;
         }
     }
+
+    // メッセージ構築後、デバッグ情報を書き込む
+    if (index == 0u) {
+        // messageBytesをデバッグバッファにコピー
+        for (var i = 0u; i < 16u; i++) {
+            debugBuffer[i] = messageBytes[i];
+        }
+        debugBuffer[24] = msgLen;
+        debugBuffer[25] = bitLen;
+        debugBuffer[26] = nonce;
+    }
+    
+    // SHA-256変換後、状態をデバッグバッファに書き込む
+    if (index == 0u) {
+        for (var i = 0u; i < 8u; i++) {
+            debugBuffer[16 + i] = state[i];
+        }
+    }
 }
 `;
 
@@ -520,6 +540,17 @@ async function startMining(key, mask) {
         device.queue.writeBuffer(maskGpuBuffer, 0, maskUint32);
         device.queue.writeBuffer(keyGpuBuffer, 0, keyUint32);
         
+        // デバッグバッファの作成
+        const debugBuffer = device.createBuffer({
+            size: 108, // 27 u32 (messageBytes: 16, state: 8, msgLen: 1, bitLen: 1, nonce: 1)
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        });
+        
+        const debugReadBuffer = device.createBuffer({
+            size: 108,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        
         // 計算パイプラインの作成
         const computePipeline = device.createComputePipeline({
             layout: 'auto',
@@ -537,7 +568,8 @@ async function startMining(key, mask) {
                 { binding: 1, resource: { buffer: keyGpuBuffer } },
                 { binding: 2, resource: { buffer: resultBuffer } },
                 { binding: 3, resource: { buffer: nonceBuffer } },
-                { binding: 4, resource: { buffer: hashBuffer } }
+                { binding: 4, resource: { buffer: hashBuffer } },
+                { binding: 5, resource: { buffer: debugBuffer } }
             ]
         });
         
@@ -600,6 +632,7 @@ async function startMining(key, mask) {
             commandEncoder.copyBufferToBuffer(resultBuffer, 0, resultReadBuffer, 0, 4);
             commandEncoder.copyBufferToBuffer(nonceBuffer, 0, nonceReadBuffer, 0, 36);
             commandEncoder.copyBufferToBuffer(hashBuffer, 0, hashReadBuffer, 0, 32);
+            commandEncoder.copyBufferToBuffer(debugBuffer, 0, debugReadBuffer, 0, 108);
             
             const commandBuffer = commandEncoder.finish();
             device.queue.submit([commandBuffer]);
@@ -619,17 +652,30 @@ async function startMining(key, mask) {
             if (resultArray[0] !== 0) {
                 // 見つかった！
                 await hashReadBuffer.mapAsync(GPUMapMode.READ);
-                const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
+                await debugReadBuffer.mapAsync(GPUMapMode.READ);
                 
-                // u32配列をu8配列に変換（ビッグエンディアン）
-                const hashArray = new Uint8Array(32);
-                for (let i = 0; i < 8; i++) {
-                    const word = hashUint32[i];
-                    hashArray[i * 4] = (word >> 24) & 0xff;
-                    hashArray[i * 4 + 1] = (word >> 16) & 0xff;
-                    hashArray[i * 4 + 2] = (word >> 8) & 0xff;
-                    hashArray[i * 4 + 3] = word & 0xff;
+                const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
+                const debugUint32 = new Uint32Array(debugReadBuffer.getMappedRange());
+                
+                // デバッグ情報を表示
+                console.log('=== デバッグ情報 ===');
+                console.log('Nonce:', debugUint32[26]);
+                console.log('Message Length:', debugUint32[24]);
+                console.log('Bit Length:', debugUint32[25]);
+                
+                // メッセージをバイト配列として表示
+                const messageBytes = new Uint8Array(64);
+                for (let i = 0; i < 16; i++) {
+                    const word = debugUint32[i];
+                    messageBytes[i * 4] = (word >> 24) & 0xff;
+                    messageBytes[i * 4 + 1] = (word >> 16) & 0xff;
+                    messageBytes[i * 4 + 2] = (word >> 8) & 0xff;
+                    messageBytes[i * 4 + 3] = word & 0xff;
                 }
+                console.log('Message (hex):', Array.from(messageBytes.slice(0, debugUint32[24] + 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                
+                // SHA-256状態を表示
+                console.log('SHA-256 State:', Array.from(debugUint32.slice(16, 24)).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
                 
                 const foundNonce = nonceArray[1];
                 const elapsed = (Date.now() - startTime) / 1000;
@@ -640,6 +686,7 @@ async function startMining(key, mask) {
                 resultReadBuffer.unmap();
                 nonceReadBuffer.unmap();
                 hashReadBuffer.unmap();
+                debugReadBuffer.unmap();
                 
                 isMining = false;
                 break;
