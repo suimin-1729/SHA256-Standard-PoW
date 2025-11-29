@@ -672,6 +672,7 @@ async function startMining(key, mask) {
                     messageBytes[i * 4 + 3] = word & 0xff;
                 }
                 console.log('Message (hex):', Array.from(messageBytes.slice(0, 64)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                console.log('Message as string:', String.fromCharCode(...messageBytes.slice(0, debugUint32[24])));
                 console.log('Message bytes 56-63 (length field):', Array.from(messageBytes.slice(56, 64)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
                 // SHA-256状態を表示
