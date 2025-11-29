@@ -129,7 +129,9 @@ fn sha256_transform(state: ptr<function, array<u32, 8>>, chunk: ptr<function, ar
     
     // メッセージスケジュールを拡張
     for (var i = 16u; i < 64u; i++) {
+        // SIG0(x) = rightRotate(x, 7) ^ rightRotate(x, 18) ^ (x >> 3)
         let s0 = rightRotate(w[i - 15u], 7u) ^ rightRotate(w[i - 15u], 18u) ^ (w[i - 15u] >> 3u);
+        // SIG1(x) = rightRotate(x, 17) ^ rightRotate(x, 19) ^ (x >> 10)
         let s1 = rightRotate(w[i - 2u], 17u) ^ rightRotate(w[i - 2u], 19u) ^ (w[i - 2u] >> 10u);
         w[i] = w[i - 16u] + s0 + w[i - 7u] + s1;
     }
@@ -684,6 +686,9 @@ async function startMining(key, mask) {
 
                 // SHA-256状態を表示
                 console.log('SHA-256 State:', Array.from(debugUint32.slice(16, 24)).map(w => '0x' + w.toString(16).padStart(8, '0')).join(' '));
+
+                // 期待されるハッシュ値（メッセージ "aaWLKWqa7otcE1FE" をSHA-256で計算した結果）
+                // これをSHA-256 Onlineで計算して比較してください
 
                 // hashArrayを先に定義する
                 const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
