@@ -8,11 +8,11 @@ let lastTime = null;
 
 // SHA-256 compute shader
 const sha256Shader = `
-@group(0) @binding(0) var<storage, read> maskBuffer: array<u8>;
-@group(0) @binding(1) var<storage, read> keyBuffer: array<u8>;
+@group(0) @binding(0) var<storage, read> maskBuffer: array<u32>;
+@group(0) @binding(1) var<storage, read> keyBuffer: array<u32>;
 @group(0) @binding(2) var<storage, read_write> resultBuffer: array<u32>;
 @group(0) @binding(3) var<storage, read_write> nonceBuffer: array<u32>;
-@group(0) @binding(4) var<storage, read_write> hashBuffer: array<u8>;
+@group(0) @binding(4) var<storage, read_write> hashBuffer: array<u32>;
 
 // 定数（u64リテラルは直接書けないため、分割して計算）
 const RAND_MULT_LOW: u32 = 0xda3e39cbu;
@@ -152,9 +152,15 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     // メッセージを準備（64バイトのブロック）
     var message: array<u8, 64> = array<u8, 64>(0u);
     
-    // キーをコピー
+    // キーをコピー（u32からバイトを抽出）
+    let keyWords = (keyLen + 3u) / 4u;
     for (var i = 0u; i < keyLen && i < 64u; i++) {
-        message[i] = keyBuffer[i];
+        let wordIdx = i / 4u;
+        let byteIdx = i % 4u;
+        if (wordIdx < keyWords) {
+            let word = keyBuffer[wordIdx];
+            message[i] = u8((word >> ((3u - byteIdx) * 8u)) & 0xffu);
+        }
     }
     
     // ランダム部分を生成（BASE62）
@@ -215,10 +221,20 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         hash[i * 4u + 3u] = u8(state[i] & 0xffu);
     }
     
-    // マスクチェック
+    // マスクチェック（u32からバイトを抽出して比較）
     var matches = true;
+    let maskWords = (maskLen + 3u) / 4u;
     for (var i = 0u; i < maskLen && i < 32u; i++) {
-        if (hash[i] != maskBuffer[i]) {
+        let wordIdx = i / 4u;
+        let byteIdx = i % 4u;
+        if (wordIdx < maskWords) {
+            let maskWord = maskBuffer[wordIdx];
+            let maskByte = u8((maskWord >> ((3u - byteIdx) * 8u)) & 0xffu);
+            if (hash[i] != maskByte) {
+                matches = false;
+                break;
+            }
+        } else {
             matches = false;
             break;
         }
@@ -244,8 +260,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         var old = atomicCompareExchangeWeak(&resultBuffer[0], expected, desired);
         if (old == expected) {
             nonceBuffer[1] = nonce;
-            for (var i = 0u; i < 32u; i++) {
-                hashBuffer[i] = hash[i];
+            // ハッシュをu32配列に変換（ビッグエンディアン）
+            for (var i = 0u; i < 8u; i++) {
+                hashBuffer[i] = state[i];
             }
             return;
         }
@@ -382,13 +399,15 @@ async function startMining(key, mask) {
         const keySeed = fnv1a64(keyBytes);
         const RANDOM_SUFFIX_LEN = 14;
         
-        // マスクバッファ（u8配列）- 4の倍数にパディング
+        // マスクバッファ（u32配列に変換）
         const maskBufferPadded = new Uint8Array(Math.ceil(maskBytes.length / 4) * 4);
         maskBufferPadded.set(maskBytes);
+        const maskUint32 = new Uint32Array(maskBufferPadded.buffer);
         
-        // キーバッファ（u8配列）- 4の倍数にパディング
+        // キーバッファ（u32配列に変換）
         const keyBufferPadded = new Uint8Array(Math.ceil(keyBytes.length / 4) * 4);
         keyBufferPadded.set(keyBytes);
+        const keyUint32 = new Uint32Array(keyBufferPadded.buffer);
         
         // バッファの作成
         const maskGpuBuffer = device.createBuffer({
@@ -412,7 +431,7 @@ async function startMining(key, mask) {
         });
         
         const hashBuffer = device.createBuffer({
-            size: 32, // u8[32] (hash result)
+            size: 32, // u32[8] (hash result)
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         });
         
@@ -527,7 +546,17 @@ async function startMining(key, mask) {
             if (resultArray[0] !== 0) {
                 // 見つかった！
                 await hashReadBuffer.mapAsync(GPUMapMode.READ);
-                const hashArray = new Uint8Array(hashReadBuffer.getMappedRange());
+                const hashUint32 = new Uint32Array(hashReadBuffer.getMappedRange());
+                
+                // u32配列をu8配列に変換（ビッグエンディアン）
+                const hashArray = new Uint8Array(32);
+                for (let i = 0; i < 8; i++) {
+                    const word = hashUint32[i];
+                    hashArray[i * 4] = (word >> 24) & 0xff;
+                    hashArray[i * 4 + 1] = (word >> 16) & 0xff;
+                    hashArray[i * 4 + 2] = (word >> 8) & 0xff;
+                    hashArray[i * 4 + 3] = word & 0xff;
+                }
                 
                 const foundNonce = nonceArray[1];
                 const elapsed = (Date.now() - startTime) / 1000;
